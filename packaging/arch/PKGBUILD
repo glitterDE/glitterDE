@@ -1,0 +1,36 @@
+# Maintainer: rubythecutie <228643222+rubythecutie@users.noreply.github.com>
+pkgname=glitterde
+pkgver=0.13.1
+pkgrel=1
+pkgdesc='A customisable but pretty desktop environment :3'
+arch=('x86_64' 'aarch64')
+url='https://example.invalid/glitterde'
+license=('GPL-3.0-only')
+depends=('python' 'python-gobject' 'python-cairo' 'python-xlib' 'python-pillow' 'gtk3' 'libwnck3' 'vte3' 'gdk-pixbuf2'
+         'pango' 'cairo' 'libx11' 'libxcb' 'librsvg' 'libxcomposite' 'libxdamage' 'libxfixes' 'libxext' 'dbus' 'xdg-utils' 'hicolor-icon-theme')
+makedepends=('gcc' 'make' 'pkgconf' 'autoconf' 'automake' 'libtool' 'intltool' 'gettext')
+optdepends=('udisks2: mount USB sticks and other removable drives automatically'
+            'polkit-gnome: authorisation prompts (shutdown while others are logged in ...)'
+            'networkmanager: Wi-Fi and network settings'
+            'bluez: Bluetooth settings'
+            'wireplumber: audio output control'
+            'brightnessctl: backlight control'
+            'power-profiles-daemon: power profiles'
+            'inter-font: the interface font'
+            'ttf-jetbrains-mono: the terminal font'
+            'libnotify: notify-send'
+            'polkit-gnome: authentication prompts'
+            'gammastep: night light')
+install=glitterde.install
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  make
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  make DESTDIR="$pkgdir" PREFIX=/usr install
+}

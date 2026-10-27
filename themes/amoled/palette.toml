@@ -1,0 +1,96 @@
+schema = 1
+
+[surface]
+background = "#17131c"
+primary    = "#5b52c8"
+secondary  = "#7468d8"
+elevated   = "#8a7fe0"
+overlay    = "#e4dcfb"
+
+[text]
+primary   = "#ffffff"
+secondary = "#e6defa"
+muted     = "#c3b8ea"
+disabled  = "#8f86b8"
+on_light  = "#2a2d6e"
+on_light_muted = "#6f72ad"
+
+[accent]
+primary   = "#ff6fb5"
+hover     = "#ae95f5"
+pressed   = "#7f5fe0"
+on_accent = "#ffffff"
+pink      = "#f777c8"
+blue      = "#8fb4ff"
+
+[status]
+success = "#5ed48a"
+warning = "#f3c65b"
+error   = "#f06b7d"
+info    = "#70b9ff"
+
+[pride]
+pink  = "#f5a9d0"
+blue  = "#7fd0ff"
+white = "#ffffff"
+
+[materials.panel]
+tint = "#000000"
+opacity = 0.88
+blur = 12
+noise = 0
+sheen = 0.02
+border = "#ffffff"
+border_opacity = 0.38
+
+[materials.window_light]
+tint = "#cfcfdc"
+opacity = 0.92
+blur = 12
+noise = 0
+sheen = 0.02
+border = "#ffffff"
+border_opacity = 0.75
+
+[materials.window_glass]
+tint = "#08080f"
+opacity = 0.9
+blur = 12
+noise = 0
+sheen = 0.02
+border = "#ffffff"
+border_opacity = 0.70
+
+[materials.window_dark]
+tint = "#000000"
+opacity = 0.94
+blur = 12
+noise = 0
+sheen = 0.0
+border = "#ffffff"
+border_opacity = 0.55
+
+[materials.card]
+tint = "#08080e"
+opacity = 0.86
+blur = 12
+noise = 0
+sheen = 0.02
+border = "#ffffff"
+border_opacity = 0.50
+
+[materials.dock]
+tint = "#0c0c14"
+opacity = 0.86
+blur = 12
+noise = 0
+sheen = 0.02
+border = "#ffffff"
+border_opacity = 0.60
+
+[radius]
+xs = 6
+sm = 10
+md = 14
+lg = 18
+xl = 24

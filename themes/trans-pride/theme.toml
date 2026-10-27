@@ -1,0 +1,28 @@
+schema = 1
+id = "trans-pride"
+name = "Trans Pride"
+author = "glitterDE contributors"
+version = "0.1.0"
+
+[appearance]
+mode = "dark"
+app_scheme = "light"
+radius_scale = 1.0
+transparency = true
+blur = true
+
+[cursor]
+theme = "Breeze"
+size = 32
+locate_effect = true
+
+[icons]
+theme = "glitter-icons"
+
+[wallpaper]
+default = "wallpapers/dusk-bay.png"
+
+[fonts]
+ui = "Inter"
+heading = "Inter"
+monospace = "JetBrains Mono"

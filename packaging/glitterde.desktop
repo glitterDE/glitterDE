@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=glitterDE
+Comment=A customisable but pretty desktop environment :3
+Exec=glitterde-session
+TryExec=glitterde-session
+Type=Application
+DesktopNames=glitterDE
+X-LightDM-DesktopName=glitterDE

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+GenericName=SparkSettings
+Comment=Settings manager for glitterDE
+Exec=sparksettings
+Icon=glitterde-settings
+Terminal=false
+Categories=Settings;DesktopSettings;
+
+StartupWMClass=sparksettings

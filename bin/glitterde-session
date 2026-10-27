@@ -1,0 +1,80 @@
+#!/bin/sh
+# glitterDE X11 session. Started by the display manager (GDM, SDDM, LightDM, ...) from glitterde.desktop,
+# or by hand from a TTY:  startx glitterde-session
+#
+# Everything is logged to  ${XDG_STATE_HOME:-~/.local/state}/glitterde/session.log  (the display manager throws away stderr).
+# If the shell crashes it is restarted; if it keeps crashing you get a terminal and the log instead of being thrown back to the
+# login screen with "Authentication error".
+
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/glitterde"
+mkdir -p "$LOGDIR" 2>/dev/null
+LOG="$LOGDIR/session.log"
+[ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 1000000 ] && mv -f "$LOG" "$LOG.old"
+exec >>"$LOG" 2>&1 </dev/null
+echo "=== glitterDE session $(date) pid $$ ==="
+
+# Always use OUR binaries: a stale glitterde/spark* script in ~/.local/bin must never shadow the installed ones.
+BIN="$(dirname "$(readlink -f "$0")")"
+export PATH="$BIN:$PATH"
+export XDG_CURRENT_DESKTOP=glitterDE XDG_SESSION_DESKTOP=glitterde XDG_SESSION_TYPE=x11 GDK_BACKEND=x11
+: "${XCURSOR_THEME:=glitterde}"; export XCURSOR_THEME
+
+# the session needs a D-Bus session bus (notifications, MPRIS, portals); most logins already provide one
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    echo "no D-Bus session bus: starting one with dbus-run-session"
+    exec dbus-run-session -- "$0" "$@"
+fi
+echo "DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY DBUS=$DBUS_SESSION_BUS_ADDRESS"
+echo "python: $(python3 --version 2>&1)  user: $(id -un)  host: $(hostname 2>/dev/null)"
+
+# ---- logs: ~/.local/state/glitterde/{session,comp,wm,shell}.log (the previous session's logs are kept as *.log.old)
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/glitterde"; mkdir -p "$LOGDIR" 2>/dev/null
+for f in session comp wm shell; do [ -f "$LOGDIR/$f.log" ] && mv -f "$LOGDIR/$f.log" "$LOGDIR/$f.log.old"; done
+slog() { echo "$(date '+%F %T') $*" >> "$LOGDIR/session.log"; }
+
+# run a component; if it CRASHES (non-zero exit) start it again (max 5 times a minute). A clean exit (0) ends supervision.
+supervise() {
+    name=$1; shift; n=0; t0=$(date +%s)
+    while :; do
+        "$@" >> "$LOGDIR/$name.log" 2>&1; rc=$?
+        [ "$rc" -eq 0 ] && { slog "$name exited cleanly"; return 0; }
+        now=$(date +%s); [ $((now - t0)) -gt 60 ] && { n=0; t0=$now; }
+        n=$((n + 1)); slog "$name died with status $rc (restart $n)"
+        [ "$n" -gt 5 ] && { slog "$name keeps crashing, giving up"; return "$rc"; }
+        sleep 1
+    done
+}
+
+slog "session start (glitterde $(cat "$BIN/../VERSION" 2>/dev/null))"
+SUPS=""
+if [ -z "$GLITTERDE_NO_COMP" ] && [ -x "$BIN/glitter-comp" ]; then
+    supervise comp "$BIN/glitter-comp" & SUPS="$SUPS $!"
+    sleep 0.4
+fi
+if [ -n "$GLITTERDE_WM" ]; then supervise wm "$GLITTERDE_WM" & else supervise wm "$BIN/glitter-wm" & fi
+SUPS="$SUPS $!"
+
+# wait (max ~5 s) until the window manager has announced itself, so the shell's first windows get framed
+python3 - <<'PY'
+import time
+from Xlib import display
+try:
+    d = display.Display(); root = d.screen().root; atom = d.intern_atom("_NET_SUPPORTING_WM_CHECK")
+    for _ in range(50):
+        if root.get_full_property(atom, 0): break
+        time.sleep(0.1)
+except Exception:
+    pass
+PY
+
+"$BIN/glitterde-autostart" >/dev/null 2>&1 &
+# the shell is the session: a clean exit is "log out"; a crash restarts it instead of dropping you out
+supervise shell "$BIN/glitterde-shell" --as-desktop
+STATUS=$?
+slog "shell finished with status $STATUS, ending session"
+
+# tear down: stop the supervisors, then the components they were running
+for p in $SUPS; do kill "$p" 2>/dev/null; done
+pkill -u "$(id -u)" -f "$BIN/glitter-comp" 2>/dev/null
+pkill -u "$(id -u)" -f "$BIN/glitter-wm" 2>/dev/null
+exit $STATUS

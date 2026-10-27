@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+GenericName=SparkFiles
+Comment=File manager for glitterDE
+Exec=sparkfiles %U
+Icon=glitterde-files
+Terminal=false
+Categories=System;FileManager;Utility;
+MimeType=inode/directory;
+StartupWMClass=sparkfiles

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+GenericName=SparkTerm
+Comment=Terminal emulator for glitterDE
+Exec=sparkterm
+Icon=glitterde-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=sparkterm

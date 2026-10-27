@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Screenshot
+Comment=Capture the screen, an area or a window
+Exec=glitterde-screenshot --ui
+Icon=camera-photo
+Categories=Utility;GTK;
+Actions=Screen;Window;
+
+[Desktop Action Screen]
+Name=Whole screen
+Exec=glitterde-screenshot --full
+
+[Desktop Action Window]
+Name=Active window
+Exec=glitterde-screenshot --window
