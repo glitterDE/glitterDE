@@ -1,6 +1,6 @@
 # Maintainer: rubythecutie <228643222+rubythecutie@users.noreply.github.com>
 pkgname=glitterde
-pkgver=0.13.1
+pkgver=0.13.2
 pkgrel=1
 pkgdesc='A customisable but pretty desktop environment :3'
 arch=('x86_64' 'aarch64')

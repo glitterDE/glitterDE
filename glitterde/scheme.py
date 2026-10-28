@@ -55,3 +55,49 @@ def panel_class():
 def app_material(name):
     """Map the light app material to its dark counterpart when the dark scheme is active."""
     return "window_dark" if (name == "window_light" and is_dark()) else name
+
+
+_applied = None
+
+
+def apply_system():
+    """Tell the rest of the desktop (GTK apps, Firefox/Chromium via the settings portal) whether the desktop is dark.
+
+    Browsers answer `prefers-color-scheme` from GTK / the freedesktop settings portal, not from glitterDE's own config,
+    so we mirror our scheme into GTK's settings.ini and GSettings (org.gnome.desktop.interface color-scheme, which
+    xdg-desktop-portal-gtk serves as the portal's `color-scheme`). Safe to call repeatedly; only writes on change."""
+    global _applied
+    dark = is_dark()
+    if _applied == dark:
+        return
+    _applied = dark
+    try:
+        import os
+        from gi.repository import Gio, GLib
+        for d in ("gtk-3.0", "gtk-4.0"):
+            folder = os.path.join(GLib.get_user_config_dir(), d)
+            f = os.path.join(folder, "settings.ini")
+            kf = GLib.KeyFile()
+            try:
+                kf.load_from_file(f, GLib.KeyFileFlags.NONE)
+            except GLib.Error:
+                pass
+            try:
+                if kf.get_boolean("Settings", "gtk-application-prefer-dark-theme") == dark:
+                    continue
+            except GLib.Error:
+                pass
+            os.makedirs(folder, exist_ok=True)
+            kf.set_boolean("Settings", "gtk-application-prefer-dark-theme", dark)
+            kf.save_to_file(f)
+        src = Gio.SettingsSchemaSource.get_default()
+        if src is not None and src.lookup("org.gnome.desktop.interface", True) is not None:
+            st = Gio.Settings.new("org.gnome.desktop.interface")
+            st.set_string("color-scheme", "prefer-dark" if dark else "prefer-light")
+            cur = st.get_string("gtk-theme")
+            if cur in ("", "Adwaita", "Adwaita-dark"):          # never override a theme the user picked themselves
+                st.set_string("gtk-theme", "Adwaita-dark" if dark else "Adwaita")
+            Gio.Settings.sync()
+    except Exception as e:                                       # a missing schema / read-only config must never break the shell
+        import sys
+        print("glitterde: could not publish colour scheme:", e, file=sys.stderr)

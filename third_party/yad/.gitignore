@@ -15,7 +15,7 @@ data/yad-icon-browser.desktop
 data/yad.m4
 data/yad.spec
 po/.intltool-merge-cache
-po/Makefile.in.in
+po/Makefile.in
 po/POTFILES
 po/*.gmo
 po/stamp-it

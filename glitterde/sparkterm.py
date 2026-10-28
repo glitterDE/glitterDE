@@ -51,7 +51,7 @@ class SparkTerm(appkit.GlassWindow):
     def __init__(self, cwd=None, command=None):
         super().__init__("SparkTerm", "sparkterm", "window_dark", (820, 520), light=False)
         self.cwd, self.command = cwd or GLib.get_home_dir(), command
-        self.nb = Gtk.Notebook(); self.nb.set_scrollable(True); self.nb.set_show_border(False)
+        self.nb = Gtk.Notebook(); self.nb.set_scrollable(True); self.nb.set_show_border(False); self.nb.set_show_tabs(True)
         self.nb.set_margin_start(4); self.nb.set_margin_end(4); self.nb.set_margin_bottom(4)
         add = icon_button("plus", 13, "New tab (Ctrl+Shift+T)", self.new_tab, pad=7)
         add.show_all(); self.nb.set_action_widget(add, Gtk.PackType.END)
@@ -125,7 +125,7 @@ class SparkTerm(appkit.GlassWindow):
                                                         self.set_title(term.get_window_title() or "SparkTerm")))
         t.connect("child-exited", lambda term, *_: self.close_tab(sw))
         close.connect("clicked", lambda *_: self.close_tab(sw))
-        self.nb.set_show_tabs(self.nb.get_n_pages() > 1)
+        self.nb.set_show_tabs(True)                  # always: the + button lives in the tab bar, so hiding the bar hid the only way to open a tab
 
     def zoom(self, delta):
         sw = self.nb.get_nth_page(self.nb.get_current_page())
@@ -139,7 +139,6 @@ class SparkTerm(appkit.GlassWindow):
             self.nb.remove_page(i)
         if self.nb.get_n_pages() == 0:
             Gtk.main_quit()
-        self.nb.set_show_tabs(self.nb.get_n_pages() > 1)
 
     def _key(self, w, ev):
         ctrl_shift = ev.state & Gdk.ModifierType.CONTROL_MASK and ev.state & Gdk.ModifierType.SHIFT_MASK
@@ -147,6 +146,11 @@ class SparkTerm(appkit.GlassWindow):
         cur = getattr(page, "term", page)
         if ctrl_shift and ev.keyval in (Gdk.KEY_T, Gdk.KEY_t):
             self.new_tab(); return True
+        n = self.nb.get_n_pages()
+        if ev.state & Gdk.ModifierType.CONTROL_MASK and ev.keyval in (Gdk.KEY_Page_Down, Gdk.KEY_Page_Up) and n > 1:
+            self.nb.set_current_page((self.nb.get_current_page() + (1 if ev.keyval == Gdk.KEY_Page_Down else -1)) % n); return True
+        if ev.state & Gdk.ModifierType.MOD1_MASK and Gdk.KEY_1 <= ev.keyval <= Gdk.KEY_9 and ev.keyval - Gdk.KEY_1 < n:
+            self.nb.set_current_page(ev.keyval - Gdk.KEY_1); return True
         if ctrl_shift and ev.keyval in (Gdk.KEY_W, Gdk.KEY_w) and page is not None:
             self.close_tab(page); return True
         if ev.state & Gdk.ModifierType.CONTROL_MASK and ev.keyval in (Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add):

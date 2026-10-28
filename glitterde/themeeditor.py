@@ -14,7 +14,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
-from . import config, tokens
+from . import config, scheme, tokens
 from .menus import ChoiceButton
 from .widgets import label
 
@@ -26,6 +26,20 @@ COLOURS = [("Accent", ("accent", "primary")), ("Pink accent", ("accent", "pink")
            ("Card glass", ("materials", "card", "tint")), ("Window glass", ("materials", "window_glass", "tint")),
            ("Light window", ("materials", "window_light", "tint")), ("Dark window", ("materials", "window_dark", "tint")),
            ("Text on light", ("text", "on_light"))]
+
+EDITOR_CSS = b"""
+dialog.themeeditor-dark, dialog.themeeditor-dark .background { background-color: #23243f; color: #ecebfa; }
+dialog.themeeditor-dark label { color: #ecebfa; }
+dialog.themeeditor-dark label.muted { color: rgba(236,235,250,0.74); }
+dialog.themeeditor-dark entry { background-color: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.18); color: #ffffff; caret-color: #ffffff; }
+dialog.themeeditor-dark button { background-image: none; background-color: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.20); color: #ecebfa; box-shadow: none; text-shadow: none; }
+dialog.themeeditor-dark button:hover { background-color: rgba(255,255,255,0.18); }
+dialog.themeeditor-dark scale trough { background-color: rgba(255,255,255,0.20); }
+dialog.themeeditor-dark scale value { color: #ecebfa; }
+dialog.themeeditor-dark scrolledwindow, dialog.themeeditor-dark viewport { background-color: transparent; }
+dialog.themeeditor-dark scrollbar slider { background-color: rgba(255,255,255,0.36); }
+dialog.themeeditor-light, dialog.themeeditor-light .background { background-color: #f3f1fb; }
+"""
 
 
 # ------------------------------------------------------------------ toml writer
@@ -102,6 +116,11 @@ def _set(d, path, v):
 class ThemeEditor(Gtk.Dialog):
     def __init__(self, parent, base, on_done, new_copy=False):
         super().__init__(title="Theme editor", transient_for=parent, modal=False)
+        dark = scheme.is_dark()                                             # follow the desktop colour scheme, not GTK's default (light) theme
+        ctx = self.get_style_context()
+        ctx.add_class("themeeditor-dark" if dark else "themeeditor-light"); ctx.add_class(scheme.panel_class())
+        prov = Gtk.CssProvider(); prov.load_from_data(EDITOR_CSS)            # screen-wide (a widget-level provider would not reach the children); every rule is scoped by our class
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_USER + 20)
         self.base, self.on_done = base, on_done
         self.prev_theme = config.load().get("appearance", {}).get("theme", "trans-pride")
         self.prev_accent = config.load().get("accent", {}).get("primary")

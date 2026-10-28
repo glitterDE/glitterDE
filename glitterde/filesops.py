@@ -572,7 +572,8 @@ class FileOps:
             kids.append(("item", "Other application…", lambda: self.open_with_other(files)))
             items.append(("sub", "grid", "Open With", kids))
         if is_dir:
-            items += [("itemi", "windows", "Open in New Window", lambda: self.open_new_window(files[0])),
+            items += [("itemi", "plus", "Open in New Tab", lambda: self.new_tab(files[0])),
+                      ("itemi", "windows", "Open in New Window", lambda: self.open_new_window(files[0])),
                       ("itemi", "terminal", "Open Terminal Here", lambda: self.open_terminal(files[0]))]
         items.append(("sep",))
         items += [("itemi", None, "Cut", self.cut_sel, True, "Ctrl+X"), ("itemi", "clipboard", "Copy", self.copy_sel, True, "Ctrl+C")]

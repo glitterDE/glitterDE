@@ -42,6 +42,7 @@ class SparkFiles(FileOps, appkit.GlassWindow):
     def __init__(self, start=None):
         super().__init__("Files", "sparkfiles", "window_light", (940, 600))
         self.hist, self.pos, self.cwd, self.filter, self.hidden = [], -1, None, "", False
+        self.tabs, self.cur_tab = [{"hist": [], "pos": -1, "cwd": None}], 0       # every tab keeps its own history; the views below show the current one
         saved = config.load("files.toml").get("view", {})
         self.sort = saved.get("sort", "name") if saved.get("sort") in ("name", "size", "type", "modified") else "name"
         self.sort_rev = bool(saved.get("reverse", False))
@@ -61,14 +62,20 @@ class SparkFiles(FileOps, appkit.GlassWindow):
             tb.pack_start(b, False, False, 0)
         self.path = Gtk.Entry(); self.path.set_hexpand(True)
         self.path.connect("activate", self._path_enter)
+        self._path_dirty = False
+        self.path.connect("changed", lambda e: setattr(self, "_path_dirty", e.has_focus()))
+        self.path.connect("focus-out-event", lambda e, ev: setattr(self, "_path_dirty", False) or False)
         self.search = Gtk.Entry(); self.search.set_width_chars(20); self.search.set_placeholder_text("Search files...")
         self.search.connect("changed", lambda e: self._set_filter(e.get_text()))
         self.b_hid = icon_button("list", 15, "Menu", None, color=ink(), pad=8)
         self.b_hid.connect("clicked", lambda b: self._main_menu(b))
         self.b_view = icon_button("grid", 15, "", self.toggle_view, color=ink(), pad=8)
+        self.b_tab = icon_button("plus", 15, "New tab (Ctrl+T)", self.new_tab, color=ink(), pad=8)
         tb.pack_start(self.path, True, True, 4); tb.pack_start(search_overlay(self.search, (0.165, 0.176, 0.43, 0.8)), False, False, 0)
-        tb.pack_start(self.b_view, False, False, 0); tb.pack_start(self.b_hid, False, False, 0)
+        tb.pack_start(self.b_tab, False, False, 0); tb.pack_start(self.b_view, False, False, 0); tb.pack_start(self.b_hid, False, False, 0)
         outer.pack_start(tb, False, False, 0)
+        self.tabstrip = Gtk.Box(spacing=4); self.tabstrip.set_no_show_all(True)          # only shown once there is more than one tab
+        outer.pack_start(self.tabstrip, False, False, 0)
 
         body = Gtk.Box(spacing=8)
         outer.pack_start(body, True, True, 0)
@@ -165,6 +172,10 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         treeview.filelist, treeview.filelist:selected { background: transparent; }
         treeview.filelist { color: inherit; }
         treeview.filelist:selected { background-color: alpha(#7a5cff, 0.28); border-radius: 8px; }
+        button.filetab { padding: 2px 6px; border-radius: 9px; background-image: none; box-shadow: none; border: 1px solid transparent; }
+        button.filetab.sel { background-color: alpha(#7a5cff, 0.28); }
+        button.filetab:hover { background-color: alpha(#7a5cff, 0.16); }
+        entry.error { border-color: #ff5c7a; box-shadow: 0 0 0 1px #ff5c7a; }
         treeview.filelist header button { background: transparent; border: none; box-shadow: none; font-weight: 600; padding: 6px 0; }
         """)
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -349,6 +360,75 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         self._watch_dir()
         self.refresh()
 
+    # ------------------------------------------------------------- tabs
+    def _save_tab(self):
+        self.tabs[self.cur_tab].update(hist=list(self.hist), pos=self.pos, cwd=self.cwd)
+
+    def _load_tab(self, i):
+        t = self.tabs[i]
+        self.cur_tab = i
+        self.hist, self.pos = list(t["hist"]), t["pos"]
+        self.go(t["cwd"] or Gio.File.new_for_path(GLib.get_home_dir()), push=False)
+
+    def new_tab(self, f=None):
+        if not isinstance(f, Gio.File):
+            f = self.cwd or Gio.File.new_for_path(GLib.get_home_dir())
+        self._save_tab()
+        self.tabs.append({"hist": [f], "pos": 0, "cwd": f})
+        self._load_tab(len(self.tabs) - 1)
+        self._rebuild_tabs()
+
+    def switch_tab(self, i):
+        if 0 <= i < len(self.tabs) and i != self.cur_tab:
+            self._save_tab()
+            self._load_tab(i)
+            self._rebuild_tabs()
+
+    def close_tab(self, i=None):
+        i = self.cur_tab if i is None else i
+        if len(self.tabs) <= 1:
+            self.destroy()
+            return
+        self._save_tab()
+        del self.tabs[i]
+        if i < self.cur_tab:
+            self.cur_tab -= 1
+        self.cur_tab = min(self.cur_tab, len(self.tabs) - 1)
+        self._load_tab(self.cur_tab)
+        self._rebuild_tabs()
+
+    def _tab_title(self, t):
+        f = t.get("cwd")
+        if f is None:
+            return "Files"
+        if f.get_uri() == "trash:///":
+            return "Trash"
+        if f.get_path() == GLib.get_home_dir():
+            return "Home"
+        return f.get_basename() or "/"
+
+    def _rebuild_tabs(self):
+        for ch in self.tabstrip.get_children():
+            self.tabstrip.remove(ch); ch.destroy()
+        self._save_tab()
+        for i, t in enumerate(self.tabs):
+            box = Gtk.Box(spacing=4)
+            lb = label(self._tab_title(t)); lb.set_max_width_chars(18)
+            box.pack_start(lb, False, False, 0)
+            x = icon_button("close", 9, "Close tab", lambda i=i: self.close_tab(i), color=ink(), pad=4)
+            box.pack_start(x, False, False, 0)
+            b = Gtk.Button(); b.add(box); b.set_relief(Gtk.ReliefStyle.NONE); b.set_focus_on_click(False)
+            ctx = b.get_style_context(); ctx.add_class("filetab")
+            if i == self.cur_tab:
+                ctx.add_class("sel")
+            b.connect("clicked", lambda _b, i=i: self.switch_tab(i))
+            b.connect("button-press-event", lambda _b, ev, i=i: (self.close_tab(i), True)[1] if ev.button == 2 else False)   # middle-click closes
+            self.tabstrip.pack_start(b, False, False, 0)
+        multi = len(self.tabs) > 1
+        self.tabstrip.set_visible(multi)
+        if multi:
+            self.tabstrip.show_all()
+
     def back(self):
         if self.pos > 0:
             self.pos -= 1; self.go(self.hist[self.pos], push=False)
@@ -363,8 +443,28 @@ class SparkFiles(FileOps, appkit.GlassWindow):
             self.go(p)
 
     def _path_enter(self, e):
-        t = os.path.expanduser(e.get_text().strip())
-        self.go(Gio.File.new_for_commandline_arg(t))
+        """Enter in the location box: ~, relative paths (against the folder being shown), URIs and trailing slashes all work."""
+        t = e.get_text().strip()
+        if not t:
+            return
+        if "://" in t:
+            f = Gio.File.new_for_uri(t)
+        else:
+            t = os.path.expanduser(os.path.expandvars(t))
+            if not os.path.isabs(t):
+                base = self.cwd.get_path() if self.cwd is not None and self.cwd.get_path() else GLib.get_home_dir()
+                t = os.path.join(base, t)
+            f = Gio.File.new_for_path(os.path.normpath(t))
+        self._path_dirty = False
+        self.go(f)
+        if self.cwd is not None and self.cwd.equal(f):
+            self._focus_content()
+        else:
+            self.path.get_style_context().add_class("error")             # the status bar says why; the box turns red until you edit it
+            self.path.connect_after("changed", lambda w: w.get_style_context().remove_class("error"))
+
+    def _focus_content(self):
+        (self.tree if self.view == "list" else self.flow).grab_focus()
 
     def _main_menu(self, btn):
         items = [("item", "New folder…", self.new_folder),
@@ -451,7 +551,8 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         if self.cwd.get_uri() == "trash:///":
             name = "Trash"
         self.set_title(name or "/")
-        self.path.set_text(self.cwd.get_path() or self.cwd.get_uri())
+        if not (self.path.has_focus() and self.path.get_text() != (self.cwd.get_path() or self.cwd.get_uri()) and self._path_dirty):
+            self.path.set_text(self.cwd.get_path() or self.cwd.get_uri())      # (a background refresh must not wipe a path being typed)
         self.b_back.set_sensitive(self.pos > 0); self.b_fwd.set_sensitive(self.pos < len(self.hist) - 1)
         self.b_up.set_sensitive(self.cwd.get_parent() is not None)
         self.empty.set_text(err or ("No files match." if self.filter else "This folder is empty.") if not entries else "")
@@ -459,6 +560,8 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         self.status.set_text("%d item%s%s" % (len(entries), "" if len(entries) == 1 else "s", "  (hidden files shown)" if self.hidden else ""))
         self._recent()
         self._sync_sidebar()
+        if len(self.tabs) > 1 and getattr(self, "tabstrip", None) is not None:
+            self._rebuild_tabs()
 
     def _make_item(self, info):
         is_dir = info.get_file_type() == Gio.FileType.DIRECTORY
@@ -575,6 +678,8 @@ class SparkFiles(FileOps, appkit.GlassWindow):
             if ch not in self.flow.get_selected_children():
                 self.flow.unselect_all(); self.flow.select_child(ch)
             return self._item_menu(ev, ch.info, ch.file)
+        if ev.button == 2 and ch.info.get_file_type() == Gio.FileType.DIRECTORY:           # middle-click a folder: new tab
+            self.new_tab(ch.file); return True
         return False
 
     def _bg_click(self, w, ev):
@@ -654,6 +759,14 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         elif ctrl and k == Gdk.KEY_2:
             if self.view != "list":
                 self.toggle_view()
+        elif ctrl and not ev.state & Gdk.ModifierType.SHIFT_MASK and k in (Gdk.KEY_t, Gdk.KEY_T):
+            self.new_tab()
+        elif ctrl and not ev.state & Gdk.ModifierType.SHIFT_MASK and k in (Gdk.KEY_w, Gdk.KEY_W):
+            self.close_tab()
+        elif ctrl and k in (Gdk.KEY_Page_Down, Gdk.KEY_Page_Up) and len(self.tabs) > 1:
+            self.switch_tab((self.cur_tab + (1 if k == Gdk.KEY_Page_Down else -1)) % len(self.tabs))
+        elif ctrl and k in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and len(self.tabs) > 1:
+            self.switch_tab((self.cur_tab + (-1 if ev.state & Gdk.ModifierType.SHIFT_MASK else 1)) % len(self.tabs))
         elif ctrl and k in (Gdk.KEY_l, Gdk.KEY_L):
             self.path.grab_focus()
         elif ctrl and k in (Gdk.KEY_f, Gdk.KEY_F):

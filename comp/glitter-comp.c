@@ -38,7 +38,7 @@ typedef struct Win {
     Damage damage;
     Pixmap pix;
     cairo_surface_t *surf;
-    int blur, shadow, radius;
+    int blur, shadow, radius, opaque;                               /* opaque: 0 no, 1 solid dark backdrop, 2 solid light backdrop (fullscreen) */
     XRectangle *shape; int nshape; int shape_valid;
     cairo_surface_t *blur_surf; int blur_valid, bx, by, bw, bh;      /* cached blurred backdrop */
     cairo_surface_t *shadow_surf; int sh_w, sh_h, sh_r;             /* cached shadow bitmap */
@@ -58,7 +58,7 @@ static int dirty = 1, running = 1;
 static long n_blur, n_restack, n_damage;          /* statistics (GLITTERDE_COMP_STATS=1) */
 static int dx1 = 0, dy1 = 0, dx2 = 0, dy2 = 0;   /* dirty rectangle (screen coords), empty when dx2<=dx1 */
 #define PAD 64
-static Atom a_blur, a_shadow, a_radius, a_body;
+static Atom a_blur, a_shadow, a_radius, a_body, a_opaque;
 static double now_ms(void);
 
 static int on_error(Display *d, XErrorEvent *e) { (void)d; (void)e; return 0; }
@@ -110,6 +110,7 @@ static void props(Win *w) {
     w->shadow = (int)get_card(w->id, a_shadow, 0);
     w->radius = (int)get_card(w->id, a_radius, 0);
     w->body_y = (int)get_card(w->id, a_body, 0);
+    w->opaque = (int)get_card(w->id, a_opaque, 0);
 }
 
 static void drop_pix(Win *w) {
@@ -446,6 +447,13 @@ static void paint(void) {
             if (now_ms() < w->hold_until) { s = w->old_surf; held = 1; } else drop_old(w);
         }
         if (!s) continue;
+        if (w->opaque) {                                             /* fullscreen: nothing below (panel, widgets, wallpaper) may show through the app's glass */
+            cairo_save(c);
+            cairo_rectangle(c, w->x, w->y, w->w, w->h);
+            if (w->opaque == 2) cairo_set_source_rgb(c, 0.94, 0.93, 0.98); else cairo_set_source_rgb(c, 0.09, 0.075, 0.16);
+            cairo_fill(c);
+            cairo_restore(c);
+        }
         if (w->shadow) draw_shadow(c, w);
         if (w->blur) {
             if (!w->blur_valid) blur_compute(w);
@@ -481,8 +489,27 @@ static void paint(void) {
 
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000.0 + t.tv_nsec / 1e6; }
 
+/* The screen size changed (xrandr / hot-plug): the back buffer and the overlay surface were sized once at startup, so the new area
+   was never painted (only the hardware cursor showed there). Rebuild them at the new size and repaint everything. */
+static void resize_root(int nw, int nh) {
+    if (nw <= 0 || nh <= 0 || (nw == W && nh == H)) return;
+    W = nw; H = nh;
+    if (bb_surf) cairo_surface_destroy(bb_surf);
+    if (bb) XFreePixmap(dpy, bb);
+    bb = XCreatePixmap(dpy, root, W, H, DefaultDepth(dpy, scr));
+    bb_surf = cairo_xlib_surface_create(dpy, bb, DefaultVisual(dpy, scr), W, H);
+    if (ov_surf) cairo_surface_destroy(ov_surf);
+    ov_surf = cairo_xlib_surface_create(dpy, overlay, DefaultVisual(dpy, scr), W, H);
+    for (Win *w = wins; w; w = w->next) w->blur_valid = 0;
+    in_flight = 0;
+    dx1 = dy1 = dx2 = dy2 = 0;
+    add_dirty(0, 0, W, H);
+    fprintf(stderr, "glitter-comp: screen is now %dx%d\n", W, H);
+}
+
 static void handle(XEvent *e) {
     Win *w;
+    if (e->type == ConfigureNotify && e->xconfigure.window == root) { resize_root(e->xconfigure.width, e->xconfigure.height); return; }
     if (e->type == damage_ev + XDamageNotify) {
         XDamageNotifyEvent *d = (XDamageNotifyEvent *)e;
         n_damage++;
@@ -563,6 +590,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     (void)maj; (void)min;
+    a_opaque = XInternAtom(dpy, "_GLITTER_OPAQUE", False);
     a_blur = XInternAtom(dpy, "_GLITTER_BLUR", False);
     a_shadow = XInternAtom(dpy, "_GLITTER_SHADOW", False);
     a_radius = XInternAtom(dpy, "_GLITTER_RADIUS", False);
@@ -594,6 +622,7 @@ int main(int argc, char **argv) {
     XUngrabServer(dpy);
     fprintf(stderr, "glitter-comp: compositing %dx%d\n", W, H);
 
+    double last_geo = 0;
     double last = 0, pace = 14, ms_paint = 0, px_paint = 0, stat_t = 0; int n_paint = 0;
     int stats = getenv("GLITTERDE_COMP_STATS") != NULL;
     add_dirty(0, 0, W, H);
@@ -606,6 +635,11 @@ int main(int argc, char **argv) {
             n_paint = 0; ms_paint = px_paint = 0; n_restack = n_blur = n_damage = 0;
         }
         double t = now_ms();
+        if (t - last_geo > 400) {          /* not every server delivers a root ConfigureNotify for RandR changes: also look at the real size */
+            Window gr; int gx, gy; unsigned gw, gh, gb, gd;
+            last_geo = t;
+            if (XGetGeometry(dpy, root, &gr, &gx, &gy, &gw, &gh, &gb, &gd)) resize_root((int)gw, (int)gh);
+        }
         present_poll();
         for (Win *hw = wins; hw; hw = hw->next)                 /* resize hold ran out: show whatever the window has now */
             if (hw->old_surf && t >= hw->hold_until) { drop_old(hw); hw->blur_valid = 0; add_dirty(hw->x, hw->y, hw->w, hw->h); }

@@ -3,7 +3,7 @@
 %global _build_id_links none
 
 Name:           glitterde
-Version:        %{?pkgversion}%{!?pkgversion:0.13.1}
+Version:        %{?pkgversion}%{!?pkgversion:0.13.2}
 Release:        1%{?dist}
 Summary:        A customisable but pretty desktop environment :3
 License:        GPL-3.0-only
@@ -96,5 +96,7 @@ make install DESTDIR=%{buildroot} PREFIX=%{_prefix} LIBDIR=%{_prefix}/lib/glitte
 %{_datadir}/doc/glitterde
 
 %changelog
+* Wed Oct 28 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.13.2-1
+- Fix multiple bugs with experience and theming
 * Tue Oct 27 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.13.1-1
 - Share source publicly for the first time

@@ -120,6 +120,9 @@ def round_shape(win, r):
     win.shape_combine_region(reg)
 
 
+MAX_WORKSPACES = 8
+
+
 class Popup(Gtk.Window):
     """A small top-level glass surface (launcher, toasts): its own window, so the WM stacks it above apps."""
 
@@ -251,6 +254,7 @@ class WindowHover(Popup):
         for w in wins:
             self.box.pack_start(self._row(w), False, False, 0)
         self.show_all()
+        self.resize(1, 1)       # a GTK window never shrinks by itself: without this a short card kept the height of the previous, taller one and hung over the dock
         cw, ch_ = self.get_preferred_size()[1].width, self.get_preferred_size()[1].height
         gw = anchor.get_window()
         if gw is None:
@@ -258,16 +262,46 @@ class WindowHover(Popup):
         _, ox, oy = gw.get_origin(); a = anchor.get_allocation()
         ax, ay = (ox + a.x, oy + a.y) if not anchor.get_has_window() else (ox, oy)
         pos = prefs.get("dock.position")
-        if below or self.shell._dock_style != "dock":           # panel items (and a dock folded into the panel): the card hangs below
+        mx, my, mw, mh = self.shell.mon
+        low = ay + a.height // 2 > my + mh // 2                  # anchors in the lower half of the screen (workspace pill, bottom dock) never hang below
+        if (below or self.shell._dock_style != "dock") and not low:   # panel items (and a dock folded into the panel): the card hangs below
             x, y = ax + a.width // 2 - cw // 2, ay + a.height + 6
+        elif below or self.shell._dock_style != "dock":
+            x, y = ax + a.width // 2 - cw // 2, ay - ch_ - 10
         elif pos == "left":
             x, y = ax + a.width + 6, ay + a.height // 2 - ch_ // 2
         elif pos == "right":
             x, y = ax - cw - 6, ay + a.height // 2 - ch_ // 2
         else:
             x, y = ax + a.width // 2 - cw // 2, ay - ch_ - 10
-        mx, my, mw, mh = self.shell.mon
-        self.move(max(mx + 6, min(x, mx + mw - cw - 6)), max(my + 6, min(y, my + mh - ch_ - 6)))
+        # Never overlap the dock itself: place the card against the dock WINDOW's edge (its margin and shadow are bigger than the
+        # item), not just against the hovered icon.
+        dw = getattr(self.shell, "dock_win", None)
+        if not below and self.shell._dock_style == "dock" and dw is not None and dw.get_visible() and dw.get_window() is not None:
+            _, dx, dy = dw.get_window().get_origin(); da = dw.get_allocation()
+            if pos == "left":
+                x = max(x, dx + da.width + 8)
+            elif pos == "right":
+                x = min(x, dx - cw - 8)
+            else:
+                y = min(y, dy - ch_ - 8)
+        x, y = max(mx + 6, min(x, mx + mw - cw - 6)), max(my + 6, min(y, my + mh - ch_ - 6))
+        # Never cover the dock: clamping to the screen used to push tall cards (or ones hung below a bottom anchor) back over it.
+        dw = getattr(self.shell, "dock_win", None)
+        dgw = dw.get_window() if dw is not None and dw.get_visible() else None
+        if dgw is not None:
+            _, dx, dy = dgw.get_origin(); da = dw.get_allocation()
+            if x < dx + da.width and dx < x + cw and y < dy + da.height and dy < y + ch_:       # overlaps the dock window
+                if da.width >= da.height:                                                      # horizontal dock: sit above it (or below if at the top)
+                    y = dy - ch_ - 8 if dy > my + mh // 2 else dy + da.height + 8
+                elif dx < mx + mw // 2:                                                         # dock on the left: to its right
+                    x = dx + da.width + 8
+                else:                                                                           # dock on the right: to its left
+                    x = dx - cw - 8
+                x, y = max(mx + 6, min(x, mx + mw - cw - 6)), max(my + 6, y)
+        self.move(x, y)
+        if self.get_window() is not None:
+            self.get_window().raise_()                    # above everything else we own, but placed so it no longer covers the dock
 
 
 class DemoMedia:
@@ -420,6 +454,7 @@ class LiveShell:
                 self.logo_btn.ico.set_icon(want)
         if scheme.refresh() and hasattr(self, "launcher_wrap"):
             self._rebuild_launcher()
+        scheme.apply_system()
         self.apply_cursor()
         if getattr(self, "greet_lbl", None):
             self.greet_lbl.set_text("%s, %s" % (greeting(), user_first_name()))     # the welcome flow can change the name
@@ -1422,8 +1457,16 @@ class LiveShell:
         if not links:
             self.net_rows.pack_start(self._empty("No network adapters found."), False, False, 0)
         self.net_rows.show_all()
-        self.wifi_ico.color = (1, 1, 1, 0.95 if any_up else 0.4); self.wifi_ico.queue_draw()
-        self.wifi_ico.set_tooltip_text("Network connected" if any_up else "No network connection")
+        self._update_net_icon(links)
+
+    def _update_net_icon(self, links=None):
+        """Tray icon: wired glyph when an Ethernet link is the one that is up (and no Wi-Fi is), Wi-Fi glyph otherwise."""
+        links = services.interfaces() if links is None else links
+        any_up = any(up for _, _, up, _ in links)
+        wired = any(up and kind != "wifi" for _, kind, up, _ in links)
+        wifi_up = any(up and kind == "wifi" for _, kind, up, _ in links)
+        self.wifi_ico.set_icon("network" if (wired and not wifi_up) else "wifi", (1, 1, 1, 0.95 if any_up else 0.4))
+        self.wifi_ico.set_tooltip_text(("Wired network connected" if (wired and not wifi_up) else "Network connected") if any_up else "No network connection")
 
     def _poll_ssid(self):
         services.run_async(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
@@ -1840,12 +1883,20 @@ class LiveShell:
                     b, lambda: [x for x in self._windows() if x.get_workspace() == ws or x.is_pinned()], True, "Workspace %d" % (ws.get_number() + 1)) and False)
                 b.connect("leave-notify-event", lambda w_, e: self._hover_leave() and False)
             self.ws_box.pack_start(b, False, False, 0)
-        add = icon_button("plus", 13, "New workspace", lambda: self.wnck and self.wnck.change_workspace_count(self.wnck.get_workspace_count() + 1), pad=7)
-        add.set_sensitive(bool(self.wnck))
-        self.ws_box.pack_start(add, False, False, 0)
+        if len(spaces) < MAX_WORKSPACES:                    # the window manager caps workspaces at 8: no "+" once that many exist
+            add = icon_button("plus", 13, "New workspace", lambda: self.wnck and self.wnck.get_workspace_count() < MAX_WORKSPACES and
+                              self.wnck.change_workspace_count(self.wnck.get_workspace_count() + 1), pad=7)
+            add.set_sensitive(bool(self.wnck))
+            self.ws_box.pack_start(add, False, False, 0)
         for ch in self.ws_box.get_children():
             ch.show_all()
         self.ws_box.set_visible(bool(prefs.get("desktop.show_workspaces")))
+        # The glass behind the pill (and its soft shadow) is painted by the desktop, not by the pill: when the pill shrinks the old,
+        # wider glass would stay on screen until something else repainted that area. Shrink the box, then repaint the whole desktop.
+        self.ws_box.queue_resize()
+        self.desk.queue_resize()
+        self.desk.queue_draw()
+        self.relayout()
 
     def _build_dock(self):
         self.dock = Gtk.Box(spacing=8)
@@ -2560,8 +2611,7 @@ class LiveShell:
         if net_open:                                # don't poll hardware for widgets nobody can see
             self.refresh_network(); self._poll_ssid()
         else:
-            any_up = any(up for _, _, up, _ in services.interfaces())
-            self.wifi_ico.color = (1, 1, 1, 0.95 if any_up else 0.4); self.wifi_ico.queue_draw()
+            self._update_net_icon()
         if self.bt_present:
             if "bluetooth" in self.enabled:
                 self._poll_bt()
@@ -2612,6 +2662,12 @@ class LiveShell:
 
     def _watch_monitors(self):
         """Hot-plug: the WM republishes the layout; follow it (new wallpaper split, panel moves to the primary monitor)."""
+        a = self.args
+        if a.as_desktop and not a.size:                          # the desktop window must follow a resolution change (xrandr), or the new area stays empty
+            scr = Gdk.Screen.get_default()
+            sw, sh = scr.get_width(), scr.get_height()
+            if sw > 0 and sh > 0 and (sw, sh) != (self.W, self.H):
+                self.win.move(0, 0); self.win.resize(sw, sh)
         cur = tuple(gfx.gdk_monitors())
         if cur != getattr(self, "_mons_seen", cur):
             self.desk.reload(self.theme)
@@ -2755,9 +2811,40 @@ class LiveShell:
                 self.toggle_launcher()          # the WM focuses the popup when it maps
             elif ev.atom.name() == "_GLITTER_WINMENU":
                 self.show_window_menu()         # the WM saw a click on a titlebar icon
+            elif ev.atom.name() == "_GLITTER_DOCKAPP":
+                self.dock_activate()            # Super+1..9
         except Exception as e:
             print("glitterde: property event:", e, file=sys.stderr)
         return False
+
+    def dock_activate(self):
+        """Super+N: bring up the N-th dock item (pinned apps first, then other running windows), or launch it if it is not running."""
+        try:
+            rd = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+            n = int(open(os.path.join(rd, "glitterde-dockapp-%d" % os.getuid())).read().strip())
+        except (OSError, ValueError):
+            return
+        wins = self._windows()
+        items, used = [], set()
+        for app in self.favs:
+            mine = [w for w in wins if self._matches(app, w)]
+            used.update(id(w) for w in mine)
+            items.append((app, mine))
+        items += [(None, [w]) for w in wins if id(w) not in used]
+        if not 1 <= n <= len(items):
+            return
+        app, mine = items[n - 1]
+        if not mine:
+            if app:
+                self.launch(app)
+            return
+        ts = Gtk.get_current_event_time()
+        w = next((x for x in mine if x.is_active()), None) or mine[0]
+        if w.get_workspace() is not None and self.wnck and w.get_workspace() != self.wnck.get_active_workspace():
+            w.get_workspace().activate(ts)
+        if w.is_minimized():
+            w.unminimize(ts)
+        w.activate(ts)
 
     def show_window_menu(self):
         """The menu behind a titlebar's app icon: restore/maximise, minimise, always on top, workspaces, close.

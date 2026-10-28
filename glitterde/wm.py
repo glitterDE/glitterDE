@@ -19,7 +19,7 @@ from Xlib.ext import shape
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import GdkPixbuf, GLib  # noqa: E402
 
-from . import config, gfx
+from . import config, gfx, scheme
 from . import icons as ic
 from . import settings_model as prefs
 from .tokens import active as active_theme
@@ -118,7 +118,7 @@ class WM:
             "_NET_WM_WINDOW_TYPE_DIALOG _NET_WM_WINDOW_TYPE_UTILITY _NET_WM_WINDOW_TYPE_SPLASH _NET_WM_WINDOW_TYPE_MENU "
             "_NET_WM_WINDOW_TYPE_TOOLTIP _NET_WM_WINDOW_TYPE_NOTIFICATION _NET_WM_WINDOW_TYPE_POPUP_MENU "
             "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU _NET_WM_WINDOW_TYPE_COMBO _NET_WM_WINDOW_TYPE_DND _NET_WM_WINDOW_TYPE_TOOLBAR "
-            "_NET_WM_STATE_SKIP_TASKBAR _GLITTER_LAUNCHER _GLITTER_MONITORS _NET_MOVERESIZE_WINDOW _NET_WM_MOVERESIZE \n            _GLITTER_BLUR _GLITTER_SHADOW _GLITTER_RADIUS _GLITTER_BODY_Y WM_WINDOW_ROLE _MOTIF_WM_HINTS _GTK_FRAME_EXTENTS _NET_WM_STATE_ABOVE _NET_WM_ICON _GLITTER_WINMENU").split()}
+            "_NET_WM_STATE_SKIP_TASKBAR _GLITTER_LAUNCHER _GLITTER_MONITORS _NET_MOVERESIZE_WINDOW _NET_WM_MOVERESIZE \n            _GLITTER_BLUR _GLITTER_SHADOW _GLITTER_RADIUS _GLITTER_BODY_Y _GLITTER_OPAQUE WM_WINDOW_ROLE _MOTIF_WM_HINTS _GTK_FRAME_EXTENTS _NET_WM_STATE_ABOVE _NET_WM_ICON _GLITTER_WINMENU _GLITTER_DOCKAPP").split()}
         A = self.A
         self.unframed_types = {A[k] for k in A if k.startswith("_NET_WM_WINDOW_TYPE_") and k.split("TYPE_")[1] in
                                ("DOCK", "SPLASH", "MENU", "TOOLTIP", "NOTIFICATION", "POPUP_MENU", "DROPDOWN_MENU",
@@ -127,7 +127,7 @@ class WM:
         self._fail = None
         self.d.set_error_handler(self._catch_redirect)
         self.root.change_attributes(event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask |
-                                    X.PropertyChangeMask | X.ButtonPressMask | X.KeyPressMask)
+                                    X.PropertyChangeMask | X.ButtonPressMask | X.KeyPressMask | X.KeyReleaseMask)
         self.d.sync()
         if self._fail:
             sys.exit("glitter-wm: another window manager is already running")
@@ -186,11 +186,12 @@ class WM:
         pr = {"glitterde-dock": 26, "glitterde-menu": 14, "glitterde-popup": 20}
         rad = 0 if full else (RAD if c.decorated else (self.theme.rad(pr[c.cls]) if pop else 0))
         shadow = int(self.shadow_on and not full and (c.decorated or pop))
-        vals = (int(blur), shadow, int(rad), int(c.off[1]))      # last: where the client area starts inside the frame (the compositor's resize hold)
+        opaque = (1 if scheme.is_dark() else 2) if c.fullscreen else 0       # fullscreen glass must not show the desktop behind it
+        vals = (int(blur), shadow, int(rad), int(c.off[1]), opaque)      # last: where the client area starts inside the frame (the compositor's resize hold)
         if vals == c._cp:
             return                                   # nothing changed: every drag/resize step used to rewrite these (3 round trips)
         c._cp = vals
-        for atom, v in zip(("_GLITTER_BLUR", "_GLITTER_SHADOW", "_GLITTER_RADIUS", "_GLITTER_BODY_Y"), vals):
+        for atom, v in zip(("_GLITTER_BLUR", "_GLITTER_SHADOW", "_GLITTER_RADIUS", "_GLITTER_BODY_Y", "_GLITTER_OPAQUE"), vals):
             c.frame.change_property(self.A[atom], Xatom.CARDINAL, 32, [v])
 
     def _client_material(self, win):
@@ -319,6 +320,11 @@ class WM:
         for c in self.clients:
             if c.is_desktop:
                 c.w, c.h = self.W, self.H
+                self.apply_geometry(c, repaint=False)
+            elif c.fullscreen:                                 # stays fullscreen: cover the monitor it was on (or the primary one if that is gone)
+                cx, cy = c.x + c.w // 2, c.y + 10
+                mx, my, mw, mh = next((m for m in self.mons if m[0] <= cx < m[0] + m[2] and m[1] <= cy < m[1] + m[3]), self.mons[0])
+                c.x, c.y, c.w, c.h = mx, my, mw, mh
                 self.apply_geometry(c, repaint=False)
             elif not c.is_dock:
                 cx, cy = c.x + c.fw // 2, c.y + 10
@@ -450,11 +456,30 @@ class WM:
                 self._prop(self.root, name, typ, 32, val)
         self.d.flush()
 
+    # Super+<key> shortcuts: key name -> action tag. A bare tap of Super still opens the launcher (on RELEASE, so Super+D is not
+    # preceded by a launcher flash).
+    SUPER_KEYS = {"d": "desktop", "e": "files", "t": "terminal", "i": "settings", "q": "close", "m": "minimize", "Up": "maximize",
+                  "Down": "restore", "Tab": "cycle", "Left": "ws-prev", "Right": "ws-next", **{str(n): "dock-%d" % n for n in range(1, 10)}}
+
+    def _detect_super_mask(self):
+        """The modifier bit the Super (Windows) keys are really bound to. Mod4 is the usual answer, but custom xmodmap/XKB setups put
+        Super on Mod3 or Mod5, and then grabs on a hard-coded Mod4 never fire (a bare Super tap would still open the launcher)."""
+        try:
+            supers = {self.d.keysym_to_keycode(XK.string_to_keysym(n)) for n in ("Super_L", "Super_R")} - {0}
+            for i, kcs in enumerate(self.d.get_modifier_mapping()):
+                if i >= 3 and supers & set(kcs):                      # rows 0-2 are Shift / Lock / Control
+                    return 1 << i
+        except Exception:
+            pass
+        return X.Mod4Mask
+
     def _grab_keys(self):
         self.keys = {}
+        self.super_mask = self._detect_super_mask()
         mods = [0, X.LockMask, X.Mod2Mask, X.LockMask | X.Mod2Mask]
         for name, base, tag in (("F4", X.Mod1Mask, "close"), ("Tab", X.Mod1Mask, "cycle"), ("Super_L", 0, "launcher"),
-                                ("Super_R", 0, "launcher"), ("Print", 0, "shot-menu")):
+                                ("Super_R", 0, "launcher"), ("Print", 0, "shot-menu"),
+                                *[(k, self.super_mask, "super-" + t) for k, t in self.SUPER_KEYS.items()]):
             kc = self.d.keysym_to_keycode(XK.string_to_keysym(name))
             if not kc:
                 continue
@@ -1312,7 +1337,8 @@ class WM:
                 time.sleep(0.004)
                 self.on_motion(pend)
                 continue
-            r, _, _ = select.select([d.fileno()], [], [], 1.0)
+            r, _, _ = select.select([d.fileno()], [], [], 0.03 if getattr(self, "_super_launch_at", None) else 1.0)
+            self._poll_super_tap()
             if time.time() - last_check > 1.0:
                 last_check = time.time()
                 try:
@@ -1337,7 +1363,7 @@ class WM:
         h = {X.MapRequest: self.on_map_request, X.ConfigureRequest: self.on_configure_request,
              X.UnmapNotify: self.on_unmap, X.DestroyNotify: self.on_destroy, X.PropertyNotify: self.on_property,
              X.ClientMessage: self.on_client_message, X.ButtonPress: self.on_button, X.ButtonRelease: self.on_release,
-             X.MotionNotify: self.on_motion, X.Expose: self.on_expose, X.KeyPress: self.on_key,
+             X.MotionNotify: self.on_motion, X.Expose: self.on_expose, X.KeyPress: self.on_key, X.KeyRelease: self.on_key_release,
              X.LeaveNotify: self.on_leave, X.EnterNotify: self.on_enter}.get(t)
         if h:
             try:
@@ -1483,8 +1509,8 @@ class WM:
 
     def on_key(self, ev):
         if os.environ.get('GLITTERDE_DEBUG'):
-            print('wm key', ev.detail, ev.state, self.keys.get((ev.detail, ev.state & ~(X.LockMask | X.Mod2Mask))), file=sys.stderr)
-        base = ev.state & ~(X.LockMask | X.Mod2Mask)
+            print('wm key', ev.detail, ev.state, self.keys.get((ev.detail, self._key_base(ev.state))), file=sys.stderr)
+        base = self._key_base(ev.state)
         tag = self.keys.get((ev.detail, base))
         if tag == "close" and self.focus_c and not self.focus_c.is_desktop:
             self.close(self.focus_c)
@@ -1498,12 +1524,100 @@ class WM:
                 subprocess.Popen([sys.executable, tool, "--ui"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             except OSError:
                 pass
-        elif tag == "launcher":
-            sh = next((x for x in self.clients if x.is_desktop), None)
-            if sh:
-                self._launch_n = getattr(self, "_launch_n", 0) + 1       # property change = reliable signal for GTK
-                sh.win.change_property(self.A["_GLITTER_LAUNCHER"], Xatom.CARDINAL, 32, [self._launch_n])
-                self.d.flush()
+        elif tag == "launcher":                          # Super pressed: it is a "tap" only if released with no other key in between
+            self._super_down, self._super_used, self._super_launch_at = True, False, None
+        elif tag and tag.startswith("super-"):
+            self._super_used = True
+            self._super_action(tag[6:])
+
+    def _key_base(self, state):
+        """Modifiers that matter for our shortcuts; Caps/Num Lock, AltGr and the like must not stop them from matching."""
+        return state & (X.ShiftMask | X.ControlMask | X.Mod1Mask | getattr(self, "super_mask", X.Mod4Mask))
+
+    def on_key_release(self, ev):
+        base = self._key_base(ev.state)
+        if self.keys.get((ev.detail, base)) == "launcher" and getattr(self, "_super_down", False):
+            self._super_down = False
+            if not self._super_used:                      # held-down Super autorepeats as release+press: wait a moment to be sure it is a real release
+                self._super_launch_at = time.time() + 0.03
+
+    def _poll_super_tap(self):
+        at = getattr(self, "_super_launch_at", None)
+        if at is not None and time.time() >= at:
+            self._super_launch_at = None
+            self._open_launcher()
+
+    def _open_launcher(self):
+        sh = next((x for x in self.clients if x.is_desktop), None)
+        if sh:
+            self._launch_n = getattr(self, "_launch_n", 0) + 1       # property change = reliable signal for GTK
+            sh.win.change_property(self.A["_GLITTER_LAUNCHER"], Xatom.CARDINAL, 32, [self._launch_n])
+            self.d.flush()
+
+    def _run_app(self, name, *args):
+        tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", name)
+        try:
+            subprocess.Popen([sys.executable, tool, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            pass
+
+    def _normal_clients(self):
+        return [x for x in self.clients if not x.is_desktop and not x.is_dock and x.focusable and self._visible(x)]
+
+    def toggle_show_desktop(self):
+        """Win+D: minimise everything, press again to bring the same windows back."""
+        hidden = [c for c in getattr(self, "_desk_hidden", []) if c in self.clients and c.minimized]
+        if hidden and not [c for c in self._normal_clients() if not c.minimized]:
+            self._desk_hidden = []
+            for c in hidden:
+                self.restore(c)
+            return
+        vis = [c for c in self._normal_clients() if not c.minimized]
+        self._desk_hidden = vis
+        for c in vis:
+            self.minimize(c)
+
+    def _super_action(self, act):
+        f = self.focus_c
+        if act == "desktop":
+            self.toggle_show_desktop()
+        elif act == "files":
+            self._run_app("sparkfiles")
+        elif act == "terminal":
+            self._run_app("sparkterm")
+        elif act == "settings":
+            self._run_app("sparksettings")
+        elif act == "close" and f and not f.is_desktop:
+            self.close(f)
+        elif act == "minimize" and f and not f.is_desktop:
+            self.minimize(f)
+        elif act == "maximize" and f and not f.is_desktop and not f.maximized:
+            self.toggle_max(f)
+        elif act == "restore" and f and not f.is_desktop:
+            self.toggle_max(f) if f.maximized else self.minimize(f)
+        elif act == "cycle":
+            order = [x for x in self.stack if self._visible(x) and not x.is_desktop and not x.minimized]
+            if len(order) > 1:
+                self.focus(order[0])
+        elif act in ("ws-prev", "ws-next"):
+            self.switch_desktop((self.cur + (1 if act == "ws-next" else -1)) % self.ndesk)
+        elif act.startswith("dock-"):
+            self._dock_app(int(act[5:]))
+
+    def _dock_app(self, n):
+        """Win+1..9: tell the shell to activate / launch the n-th dock item (the shell owns the dock)."""
+        sh = next((x for x in self.clients if x.is_desktop), None)
+        if not sh:
+            return
+        try:
+            rd = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+            with open(os.path.join(rd, "glitterde-dockapp-%d" % os.getuid()), "w") as fh:
+                fh.write(str(n))
+        except OSError:
+            return
+        self._dockapp_n = getattr(self, "_dockapp_n", 0) + 1
+        sh.win.change_property(self.A["_GLITTER_DOCKAPP"], Xatom.CARDINAL, 32, [self._dockapp_n])
+        self.d.flush()
 
     def on_button(self, ev):
         c = self.by_win.get(ev.window.id)

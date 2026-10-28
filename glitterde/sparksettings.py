@@ -2,6 +2,7 @@
 import glob
 import os
 import platform
+import shutil
 import sys
 
 import gi
@@ -135,6 +136,26 @@ class Settings(appkit.GlassWindow):
             self._ensure(row.page)
             self.stack.set_visible_child_name(row.page)
 
+    def _reload(self):
+        """settings.toml changed on disk: besides the base-class repaint, bring every visible control in line with it."""
+        r = super()._reload()
+        # (apps re-exec on a colour-scheme change inside super()._reload(); when we are still here, just sync)
+        self._sync_rows()
+        return r
+
+    def _sync_rows(self):
+        model._cache["mt"] = None                                    # force a re-read: two writes inside one mtime tick must not hide the second
+        live = []
+        for sid, fn, alive in getattr(self, "_row_sync", []):
+            if alive() is None:
+                continue
+            live.append((sid, fn, alive))
+            try:
+                fn()
+            except Exception:
+                pass
+        self._row_sync = live
+
     def on_scheme_change(self):
         import sys
         page = self.stack.get_visible_child_name() or ""
@@ -178,11 +199,17 @@ class Settings(appkit.GlassWindow):
 
     @staticmethod
     def _open_dir(path):
+        """Show a folder in our own file manager (always present), falling back to whatever the system has registered."""
+        if shutil.which("sparkfiles") or os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "sparkfiles")):
+            services.fire(["sparkfiles", path])
+            return
         from gi.repository import Gio
         try:
-            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(), None)
+            if Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(), None):
+                return
         except GLib.Error:
             pass
+        services.fire(["xdg-open", path])
 
     def _rebuild_page(self, name):
         """Throw a page away and build it again (its content depends on something that just changed)."""
@@ -270,6 +297,8 @@ class Settings(appkit.GlassWindow):
             w.set_digits(0 if typ == "int" else 2); w.set_value(cur); w.set_size_request(170, -1); w.set_value_pos(Gtk.PositionType.RIGHT)
 
             def ch(sc):
+                if state["loading"]:                                  # moved by sync(), not by the user
+                    return
                 if state["t"]:
                     GLib.source_remove(state["t"])
                 v = sc.get_value()
@@ -302,6 +331,22 @@ class Settings(appkit.GlassWindow):
             state["loading"] = False
             reset.set_visible(False)
         reset.connect("clicked", do_reset)
+
+        def sync():
+            """The setting changed elsewhere (shell '+' button, WM, another settings window, a hand edit): follow it."""
+            if state["t"] or state["loading"]:                        # the user is dragging this very control right now
+                return
+            nv = model.get(sid)
+            state["loading"] = True
+            try:
+                if typ == "bool" and w.get_active() != bool(nv): w.set_active(bool(nv))
+                elif typ in ("int", "float") and abs(w.get_value() - nv) > 1e-9: w.set_value(nv)
+                elif typ == "choice" and w.get_active_id() != str(nv): w.set_active_id(str(nv))
+            finally:
+                state["loading"] = False
+            reset.set_visible(nv != st["default"])
+        if typ in ("bool", "int", "float", "choice"):
+            self._row_sync = [f for f in getattr(self, "_row_sync", []) if f[0] != sid or f[2]() is not None] + [(sid, sync, lambda: box if box.get_parent() else None)]
         ctl.pack_start(reset, False, False, 0); ctl.pack_start(w, False, False, 0)
         box.pack_end(ctl, False, False, 0)
         state["loading"] = False
