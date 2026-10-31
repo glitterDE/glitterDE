@@ -469,6 +469,7 @@ class SparkFiles(FileOps, appkit.GlassWindow):
     def _main_menu(self, btn):
         items = [("item", "New folder…", self.new_folder),
                  ("item", "Open terminal here", lambda: __import__("glitterde.services", fromlist=["fire"]).fire(["sparkterm", self.cwd.get_path() or GLib.get_home_dir()])),
+                 ("item", "Open folder in Code", lambda: __import__("glitterde.services", fromlist=["fire"]).fire(["sparkcode", self.cwd.get_path() or GLib.get_home_dir()])),
                  ("sep",), ("head", "Sort by"),
                  ("check", "Name", self.sort == "name", lambda: self._set_sort("name")),
                  ("check", "Size", self.sort == "size", lambda: self._set_sort("size")),
