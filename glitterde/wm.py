@@ -29,9 +29,9 @@ PANEL_H = 38                        # shell panel height: windows are kept below
 MINW, MINH = 220, 120
 STICKY = 0xFFFFFFFF
 NDESK = 4
-MATERIAL = {"sparkfiles": "window_light", "sparksettings": "window_glass", "sparkterm": "window_dark"}
+MATERIAL = {"sparkfiles": "window_light", "sparksettings": "window_glass", "sparkterm": "window_dark", "sparkcode": "window_light"}
 ICON_PX = 20                         # app icon in the titlebar
-VECTOR_ICONS = {"sparkfiles": "app_files", "sparkterm": "app_terminal", "sparksettings": "app_settings"}   # our own apps: drawn, not loaded
+VECTOR_ICONS = {"sparkfiles": "app_files", "sparkterm": "app_terminal", "sparksettings": "app_settings", "sparkcode": "app_code"}   # our own apps: drawn, not loaded
 # Titlebar layouts (window.layout). side None = follow window.button_side. order is left-to-right on the side the buttons sit.
 # style: glyph (hover highlight) | wide (full-height hover blocks) | dots (traffic lights) | circle (always-on round buttons) | ubuntu (orange close)
 LAYOUTS = {

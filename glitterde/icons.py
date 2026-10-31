@@ -249,6 +249,30 @@ def _settings_gear_outline(c):
     circle(c, 12, 12, 3.2); c.stroke(); circle(c, 12, 12, 8); c.stroke()
 
 
+def _save(c):
+    rrect(c, 4.5, 4.5, 15, 15, 3); c.stroke(); _poly(c, [(8, 4.5), (8, 9), (15, 9), (15, 4.5)]); c.stroke(); rrect(c, 8, 13, 8, 6.5, 1.2); c.stroke()
+
+def _folder_line(c):
+    _poly(c, [(3.5, 6.5), (9, 6.5), (11, 9), (20.5, 9), (20.5, 18.5), (3.5, 18.5)], True); c.stroke()
+
+def _file_plus(c):
+    _poly(c, [(6.5, 3.5), (14, 3.5), (18.5, 8), (18.5, 20.5), (6.5, 20.5)], True); c.stroke(); _poly(c, [(14, 3.5), (14, 8), (18.5, 8)]); c.stroke()
+    _poly(c, [(12.5, 12), (12.5, 17)]); c.stroke(); _poly(c, [(10, 14.5), (15, 14.5)]); c.stroke()
+
+def _code(c):
+    _poly(c, [(8.5, 7.5), (4, 12), (8.5, 16.5)]); c.stroke(); _poly(c, [(15.5, 7.5), (20, 12), (15.5, 16.5)]); c.stroke()
+    _poly(c, [(13.4, 5.5), (10.6, 18.5)]); c.stroke()
+
+def _refresh(c):
+    c.new_sub_path(); c.arc(12, 12, 7.5, 0.2 * PI, 1.65 * PI); c.stroke(); _poly(c, [(13.8, 1.6), (15.4, 5.3), (11.5, 6.2)]); c.stroke()
+
+def _panel_left(c):
+    rrect(c, 3.5, 5, 17, 14, 3); c.stroke(); _poly(c, [(9.5, 5), (9.5, 19)]); c.stroke()
+
+def _collapse(c):
+    _poly(c, [(7, 9.5), (12, 5), (17, 9.5)]); c.stroke(); _poly(c, [(7, 14.5), (12, 19), (17, 14.5)]); c.stroke()
+
+
 ICONS = {k[1:]: v for k, v in list(globals().items()) if k.startswith("_") and not k.startswith("__") and callable(v)
          and k not in ("_begin", "_poly")}
 
@@ -423,6 +447,12 @@ def app_settings(c, cx, cy, s):
     x, y = cx - s / 2, cy - s / 2
     squircle(c, x, y, s, (0.58, 0.68, 1.0, 1), (0.38, 0.50, 0.98, 1), s * 0.28)
     icon(c, "gear", cx, cy, s * 0.66, (1, 1, 1, 0.97))
+
+
+def app_code(c, cx, cy, s):
+    x, y = cx - s / 2, cy - s / 2
+    squircle(c, x, y, s, (1.0, 0.70, 0.88, 1), (0.71, 0.48, 1.0, 1), s * 0.28)
+    icon(c, "code", cx, cy, s * 0.66, (1, 1, 1, 0.97), 2.3)
 
 
 def app_update(c, cx, cy, s):
