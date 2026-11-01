@@ -20,6 +20,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import appkit, config, services
 from .menus import GlassMenu
+from .progress import Cancelled, Job, ProgressWindow, copy_tree, delete_tree, move_file, remove_quietly, scan
 from .widgets import label
 
 COPIED = "x-special/gnome-copied-files"
@@ -57,22 +58,6 @@ def is_archive(name):
     return name.lower().endswith(ARCHIVE_EXT)
 
 
-def copy_tree(src, dst):
-    if src.query_file_type(NOFOLLOW, None) == Gio.FileType.DIRECTORY:
-        dst.make_directory_with_parents(None)
-        for i in src.enumerate_children("standard::name", NOFOLLOW, None):
-            copy_tree(src.get_child(i.get_name()), dst.get_child(i.get_name()))
-    else:
-        src.copy(dst, Gio.FileCopyFlags.NOFOLLOW_SYMLINKS, None, None, None)
-
-
-def delete_tree(f):
-    if f.query_file_type(NOFOLLOW, None) == Gio.FileType.DIRECTORY:
-        for i in f.enumerate_children("standard::name", NOFOLLOW, None):
-            delete_tree(f.get_child(i.get_name()))
-    f.delete(None)
-
-
 def inside(child, parent):
     a, b = child.get_path(), parent.get_path()
     return bool(a and b and (a == b or a.startswith(b.rstrip("/") + "/")))
@@ -80,22 +65,48 @@ def inside(child, parent):
 
 class FileOps:
     # ------------------------------------------------------------ plumbing
-    def _job(self, doing, work, done_text):
-        """Run work() off the UI thread; report on the status line and refresh when finished."""
-        self.status.set_text(doing)
+    def _progress_window(self):
+        pw = getattr(self, "_pw", None)
+        if pw is None:
+            pw = self._pw = ProgressWindow(self)
+        return pw
+
+    def _run_job(self, title, work, done_text, verb="Working", total=(0, 0), copy_cleanup=False):
+        """Run work(job) off the UI thread with a progress entry (window opens when it takes a moment) and a Cancel button.
+        total = (bytes, items) when known. copy_cleanup: a cancelled COPY removes what it already made."""
+        job = Job(title, verb)
+        job.total, job.n_total = total
+        self.status.set_text(title)
+        pw = self._progress_window()
+        pw.add_job(job)
 
         def run():
             err = None
             try:
-                work()
+                work(job)
+            except Cancelled:
+                job.cancelled = True
             except (GLib.Error, OSError, shutil.Error, zipfile.BadZipFile, tarfile.TarError, ValueError) as e:
                 err = getattr(e, "message", None) or str(e)
-            GLib.idle_add(self._job_done, err, done_text)
+            if job.cancelled or err:                           # do not leave half-written files lying around
+                if job.partial is not None:
+                    remove_quietly(job.partial)
+                if copy_cleanup and job.cancelled:
+                    for t in job.created:
+                        remove_quietly(t)
+            GLib.idle_add(self._job_done, job, err, done_text)
         threading.Thread(target=run, daemon=True).start()
+        return job
 
-    def _job_done(self, err, done_text):
+    def _job(self, doing, work, done_text):
+        """Simple background job without byte progress (the bar pulses): work() takes no arguments."""
+        return self._run_job(doing, lambda job: work(), done_text)
+
+    def _job_done(self, job, err, done_text):
+        job.finished, job.error = True, err
         self.refresh()
-        self.status.set_text(("Failed: %s" % err) if err else done_text)
+        self.status.set_text("Cancelled" if job.cancelled else ("Failed: %s" % err) if err else done_text)
+        self._progress_window().finish(job)
         return False
 
     def _say(self, text):
@@ -176,22 +187,28 @@ class FileOps:
                 return
             pairs.append(src)
 
-        def work():
+        n = len(pairs)
+        noun = "%d item%s" % (n, "" if n == 1 else "s") if n != 1 else "\u201c%s\u201d" % (pairs[0].get_basename() or "item")
+        where = dest.get_basename() or "/"
+        total = scan(pairs)
+
+        def work(job):
             for src in pairs:
+                job.check()
                 same = src.get_parent() is not None and src.get_parent().equal(dest)
                 if op == "cut" and same:
                     continue                                          # moving into the folder it is already in
                 target = unique_child(dest, src.get_basename())
                 if op == "cut":
-                    try:
-                        src.move(target, Gio.FileCopyFlags.NOFOLLOW_SYMLINKS, None, None, None)
-                    except GLib.Error:                                # another filesystem: copy, then remove the original
-                        copy_tree(src, target); delete_tree(src)
+                    job.partial = target
+                    move_file(src, target, job)
+                    job.partial = None
                 else:
-                    copy_tree(src, target)
-        n = len(pairs)
-        self._job("%s %d item%s..." % ("Moving" if op == "cut" else "Copying", n, "" if n == 1 else "s"), work,
-                  "%s %d item%s" % ("Moved" if op == "cut" else "Copied", n, "" if n == 1 else "s"))
+                    job.created.append(target)
+                    copy_tree(src, target, job)
+        self._run_job("%s %s to %s" % ("Moving" if op == "cut" else "Copying", noun, where), work,
+                      "%s %d item%s" % ("Moved" if op == "cut" else "Copied", n, "" if n == 1 else "s"),
+                      verb="Moving" if op == "cut" else "Copying", total=total, copy_cleanup=(op != "cut"))
 
     # ------------------------------------------------------------ drag and drop
     def setup_dnd(self):
@@ -272,14 +289,18 @@ class FileOps:
     def duplicate(self, *_):
         files = self._sel_files()
 
-        def work():
+        def work(job):
             for f in files:
-                copy_tree(f, unique_child(f.get_parent(), f.get_basename()))
-        self._job("Duplicating...", work, "Duplicated %d item%s" % (len(files), "" if len(files) == 1 else "s"))
+                t = unique_child(f.get_parent(), f.get_basename())
+                job.created.append(t)
+                copy_tree(f, t, job)
+        self._run_job("Duplicating %d item%s" % (len(files), "" if len(files) == 1 else "s"), work,
+                      "Duplicated %d item%s" % (len(files), "" if len(files) == 1 else "s"), verb="Copying", total=scan(files), copy_cleanup=True)
 
     def _choose_folder(self, title, verb):
         d = Gtk.FileChooserDialog(title=title, transient_for=self, action=Gtk.FileChooserAction.SELECT_FOLDER)
         d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button(verb, Gtk.ResponseType.OK)
+        appkit.style_stock_dialog(d)
         if self.cwd.get_path():
             d.set_current_folder(self.cwd.get_path())
         r = d.run(); path = d.get_filename(); d.destroy()
@@ -294,18 +315,20 @@ class FileOps:
             self._say("Cannot put a folder inside itself")
             return
 
-        def work():
+        def work(job):
             for f in files:
+                job.check()
                 t = unique_child(dest, f.get_basename())
                 if move:
-                    try:
-                        f.move(t, Gio.FileCopyFlags.NOFOLLOW_SYMLINKS, None, None, None)
-                    except GLib.Error:
-                        copy_tree(f, t); delete_tree(f)
+                    job.partial = t
+                    move_file(f, t, job)
+                    job.partial = None
                 else:
-                    copy_tree(f, t)
-        self._job("%s..." % ("Moving" if move else "Copying"), work, "%s %d item%s to %s" % (
-            "Moved" if move else "Copied", len(files), "" if len(files) == 1 else "s", dest.get_basename() or "/"))
+                    job.created.append(t)
+                    copy_tree(f, t, job)
+        self._run_job("%s %d item%s to %s" % ("Moving" if move else "Copying", len(files), "" if len(files) == 1 else "s", dest.get_basename() or "/"),
+                      work, "%s %d item%s to %s" % ("Moved" if move else "Copied", len(files), "" if len(files) == 1 else "s", dest.get_basename() or "/"),
+                      verb="Moving" if move else "Copying", total=scan(files), copy_cleanup=not move)
 
     def make_link(self, *_):
         files = self._sel_files()
@@ -320,7 +343,7 @@ class FileOps:
     def new_document(self, template=None):
         if template is not None:                                       # a file from ~/Templates
             t = unique_child(self.cwd, template.get_basename())
-            self._job("Creating document...", lambda: copy_tree(template, t), "Created %s" % t.get_basename())
+            self._run_job("Creating %s" % t.get_basename(), lambda job: copy_tree(template, t, job), "Created %s" % t.get_basename(), verb="Copying")
             return
         name = self._ask("New document", "File name", "Untitled document.txt")
         if not name:
@@ -359,6 +382,7 @@ class FileOps:
               if files else "application/octet-stream")
         d = Gtk.AppChooserDialog(transient_for=self, modal=True, content_type=ct)
         d.get_widget().set_show_all(True)
+        appkit.style_stock_dialog(d)
         if d.run() == Gtk.ResponseType.OK and d.get_app_info():
             self.open_with(d.get_app_info(), files)
         d.destroy()
@@ -370,34 +394,48 @@ class FileOps:
 
     # ------------------------------------------------------------ archives
     def compress(self, kind):
-        paths = [f.get_path() for f in self._sel_files() if f.get_path()]
+        files = [f for f in self._sel_files() if f.get_path()]
+        paths = [f.get_path() for f in files]
         if not paths:
             return
         base = os.path.basename(paths[0]) if len(paths) == 1 else "Archive"
         out = unique_child(self.cwd, "%s.%s" % (base, kind), suffix=" 2").get_path()
 
-        def work():
+        def work(job):
             try:
                 if kind == "zip":
                     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                        def put(full, arc):
+                            job.check()
+                            job.name = os.path.basename(full)
+                            z.write(full, arc)
+                            try:
+                                job.file_done(os.lstat(full).st_size)
+                            except OSError:
+                                job.file_done(0)
                         for p in paths:
                             parent = os.path.dirname(p)
                             if os.path.isdir(p) and not os.path.islink(p):
-                                for root, dirs, files in os.walk(p):
+                                for root, dirs, fl in os.walk(p):
                                     z.write(root, os.path.relpath(root, parent))
-                                    for fn in files:
-                                        z.write(os.path.join(root, fn), os.path.relpath(os.path.join(root, fn), parent))
+                                    for fn in fl:
+                                        put(os.path.join(root, fn), os.path.relpath(os.path.join(root, fn), parent))
                             else:
-                                z.write(p, os.path.basename(p))
+                                put(p, os.path.basename(p))
                 else:
                     with tarfile.open(out, "w:gz") as t:
+                        def flt(ti):
+                            job.check()
+                            job.name = os.path.basename(ti.name)
+                            job.file_done(ti.size if ti.isfile() else 0)
+                            return ti
                         for p in paths:
-                            t.add(p, arcname=os.path.basename(p))
-            except Exception:
+                            t.add(p, arcname=os.path.basename(p), filter=flt)
+            except BaseException:
                 if os.path.exists(out):
                     os.remove(out)
                 raise
-        self._job("Compressing...", work, "Created %s" % os.path.basename(out))
+        self._run_job("Compressing to %s" % os.path.basename(out), work, "Created %s" % os.path.basename(out), verb="Compressing", total=scan(files))
 
     def extract(self, f):
         path = f.get_path()
@@ -405,14 +443,42 @@ class FileOps:
             return
         dest = unique_child(self.cwd, split_name(f.get_basename())[0], suffix=" 2").get_path()
 
-        def work():
+        def safe(name):
+            full = os.path.realpath(os.path.join(dest, name))
+            if not (full == os.path.realpath(dest) or full.startswith(os.path.realpath(dest) + os.sep)):
+                raise ValueError("the archive wants to write outside the target folder (%s)" % name)
+
+        def work(job):
             os.makedirs(dest)
             try:
-                shutil.unpack_archive(path, dest)
-            except Exception:
+                low = path.lower()
+                if zipfile.is_zipfile(path) and low.endswith(".zip"):
+                    with zipfile.ZipFile(path) as z:
+                        infos = z.infolist()
+                        job.total = sum(i.file_size for i in infos)
+                        for i in infos:
+                            job.check(); safe(i.filename)
+                            job.name = os.path.basename(i.filename.rstrip("/")) or i.filename
+                            z.extract(i, dest)
+                            job.file_done(i.file_size)
+                elif tarfile.is_tarfile(path):
+                    with tarfile.open(path) as t:
+                        members = t.getmembers()
+                        job.total = sum(m.size for m in members if m.isfile())
+                        for m in members:
+                            job.check(); safe(m.name)
+                            job.name = os.path.basename(m.name.rstrip("/")) or m.name
+                            try:
+                                t.extract(m, dest, filter="data")
+                            except TypeError:                         # Python without extraction filters: the path check above is what we have
+                                t.extract(m, dest)
+                            job.file_done(m.size if m.isfile() else 0)
+                else:
+                    shutil.unpack_archive(path, dest)
+            except BaseException:
                 shutil.rmtree(dest, ignore_errors=True)
                 raise
-        self._job("Extracting...", work, "Extracted to %s" % os.path.basename(dest))
+        self._run_job("Extracting %s" % f.get_basename(), work, "Extracted to %s" % os.path.basename(dest), verb="Extracting")
 
     # ------------------------------------------------------------ trash
     def in_trash(self):
@@ -421,34 +487,41 @@ class FileOps:
     def restore_sel(self, *_):
         files = self._sel_files()
 
-        def work():
+        def work(job):
             for f in files:
+                job.check()
                 info = f.query_info("trash::orig-path", Gio.FileQueryInfoFlags.NONE, None)
                 orig = info.get_attribute_byte_string("trash::orig-path")
                 if not orig:
                     raise ValueError("no original location is recorded for %s" % f.get_basename())
                 dest = Gio.File.new_for_path(orig)
                 dest = unique_child(dest.get_parent(), dest.get_basename(), suffix=" (restored)")
+                job.name = f.get_basename() or ""
                 f.move(dest, Gio.FileCopyFlags.NONE, None, None, None)
-        self._job("Restoring...", work, "Restored %d item%s" % (len(files), "" if len(files) == 1 else "s"))
+                job.file_done(0)
+        self._run_job("Restoring %d item%s" % (len(files), "" if len(files) == 1 else "s"), work,
+                      "Restored %d item%s" % (len(files), "" if len(files) == 1 else "s"), verb="Restoring", total=(0, len(files)))
 
     def delete_sel(self, *_):
         files = self._sel_files()
         n = len(files)
         from .menus import GlassConfirm
-        GlassConfirm("Delete %s permanently?" % ("this item" if n == 1 else "%d items" % n), "This cannot be undone.", "Delete",
-                     lambda: self._job("Deleting...", lambda: [delete_tree(f) for f in files], "Deleted %d item%s" % (n, "" if n == 1 else "s")),
+
+        def go():
+            self._run_job("Deleting %d item%s" % (n, "" if n == 1 else "s"), lambda job: [delete_tree(f, job) for f in files],
+                          "Deleted %d item%s" % (n, "" if n == 1 else "s"), verb="Deleting", total=(0, scan(files)[1]))
+        GlassConfirm("Delete %s permanently?" % ("this item" if n == 1 else "%d items" % n), "This cannot be undone.", "Delete", go,
                      theme=self.th).show_centered()
 
     def empty_trash(self, *_):
         from .menus import GlassConfirm
         t = Gio.File.new_for_uri("trash:///")
 
-        def work():
+        def work(job):
             for i in t.enumerate_children("standard::name", Gio.FileQueryInfoFlags.NONE, None):
-                delete_tree(t.get_child(i.get_name()))
+                delete_tree(t.get_child(i.get_name()), job)
         GlassConfirm("Empty the Trash?", "Everything in it will be deleted for good.", "Empty Trash",
-                     lambda: self._job("Emptying the Trash...", work, "Trash emptied"), theme=self.th).show_centered()
+                     lambda: self._run_job("Emptying the Trash", work, "Trash emptied", verb="Deleting"), theme=self.th).show_centered()
 
     # ------------------------------------------------------------ properties
     def properties(self, files=None):

@@ -12,7 +12,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import aboutpage, appkit, config, gfx, iconpicker, services, settings_model as model, themeeditor, tokens
+from . import aboutpage, appkit, config, gfx, iconpicker, netpages, services, settings_model as model, themeeditor, tokens
 from . import icons as ic
 from .widgets import Ico, label, search_overlay
 from .menus import ChoiceButton
@@ -591,6 +591,7 @@ class Settings(appkit.GlassWindow):
 
     def _pick_wall(self, *_):
         d = Gtk.FileChooserDialog(title="Choose wallpaper", transient_for=self, action=Gtk.FileChooserAction.OPEN)
+        appkit.style_stock_dialog(d)
         d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("Use", Gtk.ResponseType.OK)
         f = Gtk.FileFilter(); f.set_name("Pictures"); f.add_mime_type("image/png"); f.add_mime_type("image/jpeg"); d.add_filter(f)
         if d.run() == Gtk.ResponseType.OK:
@@ -641,6 +642,7 @@ class Settings(appkit.GlassWindow):
     def _add_fav(self, *_):
         d = Gtk.AppChooserDialog(transient_for=self, modal=True, content_type="application/octet-stream")
         d.get_widget().set_show_all(True)
+        appkit.style_stock_dialog(d)
         if d.run() == Gtk.ResponseType.OK:
             app = d.get_app_info()
             if app and app.get_id() not in self._favs():
@@ -663,7 +665,7 @@ class Settings(appkit.GlassWindow):
             c.inner.pack_start(self.row(title, self.switch(wid in enabled, tog)), False, False, 3)
         p.pack_start(c, False, False, 0)
         rb = Gtk.Button(label="Reset widget positions"); rb.get_style_context().add_class("clear")
-        rb.connect("clicked", lambda *_: (lambda d: (d.pop("widget_pos", None), config.save(d)))(config.load()))
+        rb.connect("clicked", lambda *_: config.remove("widget_pos"))
         p.pack_start(rb, False, False, 0)
         return p
 
@@ -694,6 +696,21 @@ class Settings(appkit.GlassWindow):
             sc.connect("value-changed", changed)
             m = Gtk.Button(label="Mute / unmute"); m.get_style_context().add_class("clear"); m.connect("clicked", lambda *_: au.toggle_mute())
             c.inner.pack_start(sc, False, False, 0); c.inner.pack_start(m, False, False, 0)
+            # which output the sound goes to (speakers, headphones, HDMI, Bluetooth ...)
+            dev = ChoiceButton(light=True, theme=self.th)
+            dst = {"init": True}
+
+            def listed(rows):
+                for key, name, default in rows:
+                    dev.append(key, name)
+                    if default:
+                        dev.set_active_id(key)
+                dst["init"] = False
+                if not rows:
+                    dev.lab.set_text("No output devices")
+            dev.connect("changed", lambda b: None if dst["init"] else au.set_default(b.get_active_id(), lambda: au.get(got)))
+            au.sinks(listed)
+            c.inner.pack_start(self.row("Output device", dev), False, False, 3)
         p.pack_start(c, False, False, 0)
         return p
 
@@ -709,85 +726,10 @@ class Settings(appkit.GlassWindow):
 
     # ---------------------------------------------- network / bluetooth / power
     def p_network(self):
-        p = self.page_box(); c = self.card("Wi-Fi")
-        if not services.have("nmcli"):
-            for n, kind, up, speed in services.interfaces():
-                c.inner.pack_start(self.row("%s (%s)" % (n, kind), label("connected" if up else "not connected", "muted")), False, False, 2)
-            c.inner.pack_start(self.note("NetworkManager is not installed."), False, False, 4)
-            p.pack_start(c, False, False, 0)
-            return p
-        init = {"v": True}
-        sw = self.switch(True, lambda v: (None if init["v"] else services.wifi_set_radio(v)))
-        services.wifi_radio(lambda on: (sw.set_active(on), init.update(v=False)))
-        c.inner.pack_start(self.row("Wi-Fi", sw), False, False, 2)
-        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        c2 = self.card("Available networks"); c2.inner.pack_start(lst, False, False, 0)
-        status = label("Scanning…", "muted"); lst.pack_start(status, False, False, 0)
-
-        def fill(rows):
-            for ch in lst.get_children():
-                lst.remove(ch)
-            for inuse, ssid, sig, sec in rows[:14]:
-                b = Gtk.Button(); b.set_relief(Gtk.ReliefStyle.NONE)
-                r = Gtk.Box(spacing=10); r.pack_start(Ico("wifi", 15, (*ink()[:3], 0.45 + sig / 200.0), 1.5), False, False, 2)
-                r.pack_start(label(ssid + ("   (connected)" if inuse else "")), True, True, 0)
-                r.pack_end(label("%d%%%s" % (sig, "  secured" if sec else ""), "muted"), False, False, 0)
-                b.add(r); b.connect("clicked", lambda _b, s_=ssid, sc=bool(sec): self._connect_wifi(s_, sc, scan))
-                lst.pack_start(b, False, False, 0)
-            if not rows:
-                lst.pack_start(label("No networks found.", "muted"), False, False, 0)
-            lst.show_all()
-        scan = lambda: services.wifi_scan(fill)
-        scan()
-        rb = Gtk.Button(label="Rescan"); rb.get_style_context().add_class("clear"); rb.connect("clicked", lambda *_: scan())
-        p.pack_start(c, False, False, 0); p.pack_start(c2, False, False, 0); p.pack_start(rb, False, False, 0)
-        return p
-
-    def _connect_wifi(self, ssid, secured, rescan):
-        def done(ok):
-            if not ok and secured:
-                d = Gtk.Dialog(title="Connect to %s" % ssid, transient_for=self, modal=True)
-                d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("Connect", Gtk.ResponseType.OK)
-                d.set_default_response(Gtk.ResponseType.OK)
-                e = Gtk.Entry(); e.set_visibility(False); e.set_activates_default(True); e.set_margin_start(14); e.set_margin_end(14); e.set_margin_bottom(10)
-                d.get_content_area().pack_start(Gtk.Label(label="Password for %s" % ssid, margin=10), False, False, 0)
-                d.get_content_area().pack_start(e, False, False, 0); d.show_all()
-                if d.run() == Gtk.ResponseType.OK:
-                    services.wifi_connect(ssid, e.get_text(), lambda ok2: GLib.timeout_add(800, lambda: (rescan(), False)[1]))
-                d.destroy()
-            else:
-                GLib.timeout_add(800, lambda: (rescan(), False)[1])
-        services.wifi_connect(ssid, None, done)
+        return netpages.NetworkPage(self)
 
     def p_bluetooth(self):
-        p = self.page_box(); c = self.card("Bluetooth")
-        if not services.bt_adapter():
-            c.inner.pack_start(self.note("No Bluetooth adapter found."), False, False, 4)
-            p.pack_start(c, False, False, 0)
-            return p
-        init = {"v": True}
-        sw = self.switch(False, lambda v: (None if init["v"] else services.bt_set_power(v)))
-        services.bt_powered(lambda on: (sw.set_active(on), init.update(v=False)))
-        c.inner.pack_start(self.row("Bluetooth", sw), False, False, 2)
-        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        c2 = self.card("Paired devices"); c2.inner.pack_start(lst, False, False, 0)
-
-        def fill(rows):
-            for ch in lst.get_children():
-                lst.remove(ch)
-            for mac, name, conn in rows:
-                r = Gtk.Box(spacing=10); r.pack_start(Ico("bluetooth", 15, ink(), 1.5), False, False, 2)
-                r.pack_start(label(name), True, True, 0)
-                b = Gtk.Button(label="Disconnect" if conn else "Connect"); b.get_style_context().add_class("clear")
-                b.connect("clicked", lambda _b, m=mac, cn=conn: (services.bt_toggle(m, cn), GLib.timeout_add(2500, lambda: (refresh(), False)[1])))
-                r.pack_end(b, False, False, 0); lst.pack_start(r, False, False, 2)
-            if not rows:
-                lst.pack_start(label("No paired devices. Pair one with bluetoothctl for now.", "muted"), False, False, 0)
-            lst.show_all()
-        refresh = lambda: services.bt_devices(fill)
-        refresh()
-        p.pack_start(c, False, False, 0); p.pack_start(c2, False, False, 0)
-        return p
+        return netpages.BluetoothPage(self)
 
     def p_power(self):
         p = self.page_box(); c = self.card("Power")

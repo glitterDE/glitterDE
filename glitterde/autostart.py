@@ -25,7 +25,10 @@ def entries():
 def main():
     n = 0
     for name, path in sorted(entries().items()):
-        info = Gio.DesktopAppInfo.new_from_filename(path)
+        try:
+            info = Gio.DesktopAppInfo.new_from_filename(path)
+        except TypeError:                          # PyGObject raises (instead of returning None) for a file GLib rejects: broken syntax,
+            info = None                            # TryExec missing, ... One bad entry must not stop every entry after it from starting.
         if info is None or info.get_is_hidden():
             continue
         kf = GLib.KeyFile()

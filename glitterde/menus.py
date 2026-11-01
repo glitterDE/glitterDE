@@ -39,8 +39,11 @@ _installed = False
 class GlassMenu(Gtk.Window):
     """items: ("item", label, cb) | ("check", label, checked, cb) | ("sep",) | ("head", label) | ("item", label, cb, enabled)"""
 
-    def __init__(self, items, light=False, theme=None, min_width=210, sticky=False):
-        light = light and not scheme.is_dark()          # app menus follow the colour scheme
+    def __init__(self, items, light=None, theme=None, min_width=210, sticky=False, dark=False):
+        # Every menu follows the colour scheme (`light` is kept only so old call sites keep working); dark=True is for windows that are
+        # always dark, such as the terminal.
+        light = not (dark or scheme.is_dark())
+        self.sticky = sticky
         global _installed
         super().__init__()
         if not _installed:
@@ -184,31 +187,52 @@ class GlassMenu(Gtk.Window):
             GLib.idle_add(lambda: (cb(), False)[1])
 
     def close_menu(self):
+        if self in _open:
+            _open.remove(self)
         self.hide()
         GLib.idle_add(self.destroy)
         return False
 
     def _draw(self, w, cr):
         a = self.get_allocation()
-        if self.light:
-            m = self.th.material("window_light")
-        else:
-            m = self.th.material("dock")
+        m = self.th.material("window_light" if self.light else "window_dark")
+        rim = (1, 1, 1, 0.55) if self.light else (1, 1, 1, 0.26)
         if self.comp:
             gfx.comp_glass(cr, a.width, a.height, 14, m, 1.25)
-            gfx.stroke_rrect(cr, 0, 0, a.width, a.height, 14, (1, 1, 1, 0.55), 1.2)
+            gfx.stroke_rrect(cr, 0, 0, a.width, a.height, 14, rim, 1.2)
         else:
             tr, tg, tb = m["tint"]
-            cr.set_source_rgba(tr * 0.8, tg * 0.8, tb * 0.8, 1); cr.paint()
-            gfx.stroke_rrect(cr, 0, 0, a.width, a.height, 14, (1, 1, 1, 0.5), 1.2)
+            cr.set_source_rgba(tr, tg, tb, 1) if not self.light else cr.set_source_rgba(tr * 0.97, tg * 0.97, tb * 0.97, 1)
+            cr.paint()
+            gfx.stroke_rrect(cr, 0, 0, a.width, a.height, 14, rim, 1.2)
         return False
 
     def popup_at(self, x, y):
+        close_all(self)                                    # one menu / flyout at a time: opening this one closes the others
+        if _popup_hook is not None:
+            _popup_hook(self)
+        _open.append(self)
         self.show_all()
         w, h = self.get_preferred_width()[1], self.get_preferred_height()[1]
         r = _monitor_rect(x, y)                               # the monitor the pointer is on (multi-monitor aware)
         self.move(int(max(r.x + 4, min(r.x + r.width - w - 4, x))), int(max(r.y + 4, min(r.y + r.height - h - 4, y))))
         self.present()
+
+
+_open = []                    # menus currently on screen
+_popup_hook = None            # the shell registers a function here that closes ITS flyouts (tray, launcher, hover cards) when a menu opens
+
+
+def set_popup_hook(fn):
+    global _popup_hook
+    _popup_hook = fn
+
+
+def close_all(keep=None):
+    """Close every open menu except `keep` (confirmation dialogs stay)."""
+    for m in list(_open):
+        if m is not keep and not getattr(m, "sticky", False):
+            m.close_menu()
 
 
 def _monitor_rect(x, y):

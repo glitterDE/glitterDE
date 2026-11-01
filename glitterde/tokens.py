@@ -13,40 +13,161 @@ except ImportError:                     # pragma: no cover
         _toml = None
 
 
-def _mini_toml(text):
-    """Tiny fallback parser: [a.b] tables, key = "str" | number | bool."""
-    root = {}
-    cur = root
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("["):
-            cur = root
-            for part in line.strip("[]").split("."):
-                cur = cur.setdefault(part, {})
-            continue
-        k, _, v = line.partition("=")
-        v = v.strip()
-        if v.startswith('"'):
-            v = v[1:v.find('"', 1)]
-        else:
-            v = v.split("#", 1)[0].strip()
-            if v in ("true", "false"):
-                v = v == "true"
+_ESC = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", '"': '"', "\\": "\\"}
+
+
+class _Mini:
+    """Fallback TOML reader for Python < 3.11 without tomli. Covers what themes and settings use: [a.b] tables, dotted and quoted keys,
+    basic/literal strings (with \\uXXXX escapes), ints, floats, bools, (multi-line) arrays, inline tables and # comments."""
+
+    def __init__(self, text):
+        self.t, self.i = text, 0
+
+    def ws(self, newlines=False):
+        t = self.t
+        while self.i < len(t):
+            c = t[self.i]
+            if c in " \t\r" or (newlines and c == "\n"):
+                self.i += 1
+            elif c == "#" and newlines:
+                while self.i < len(t) and t[self.i] != "\n":
+                    self.i += 1
             else:
-                try:
-                    v = float(v) if "." in v else int(v)
-                except ValueError:
-                    pass
-        cur[k.strip()] = v
-    return root
+                break
+
+    def string(self):
+        t, q = self.t, self.t[self.i]
+        self.i += 1
+        out = []
+        while self.i < len(t) and t[self.i] != q:
+            c = t[self.i]
+            if q == '"' and c == "\\" and self.i + 1 < len(t):
+                self.i += 1
+                e = t[self.i]
+                if e in "uU":
+                    n = 4 if e == "u" else 8
+                    out.append(chr(int(t[self.i + 1:self.i + 1 + n], 16)))
+                    self.i += n
+                else:
+                    out.append(_ESC.get(e, e))
+            else:
+                out.append(c)
+            self.i += 1
+        self.i += 1
+        return "".join(out)
+
+    def key(self):
+        parts = []
+        while True:
+            self.ws()
+            if self.t[self.i] in "\"'":
+                parts.append(self.string())
+            else:
+                j = self.i
+                while self.i < len(self.t) and (self.t[self.i].isalnum() or self.t[self.i] in "-_"):
+                    self.i += 1
+                parts.append(self.t[j:self.i])
+            self.ws()
+            if self.i < len(self.t) and self.t[self.i] == ".":
+                self.i += 1
+                continue
+            return parts
+
+    def value(self):
+        self.ws()
+        t, c = self.t, self.t[self.i]
+        if c in "\"'":
+            return self.string()
+        if c == "[":
+            self.i += 1
+            out = []
+            while True:
+                self.ws(True)
+                if t[self.i] == "]":
+                    self.i += 1
+                    return out
+                out.append(self.value())
+                self.ws(True)
+                if t[self.i] == ",":
+                    self.i += 1
+        if c == "{":
+            self.i += 1
+            out = {}
+            while True:
+                self.ws()
+                if t[self.i] == "}":
+                    self.i += 1
+                    return out
+                k = self.key()
+                self.ws(); self.i += 1                                   # '='
+                _put(out, k, self.value())
+                self.ws()
+                if t[self.i] == ",":
+                    self.i += 1
+        j = self.i
+        while self.i < len(t) and t[self.i] not in ",]}#\n":
+            self.i += 1
+        raw = t[j:self.i].strip()
+        if raw in ("true", "false"):
+            return raw == "true"
+        raw = raw.replace("_", "")
+        try:
+            return int(raw, 0) if raw[:2].lower() in ("0x", "0o", "0b") else int(raw)
+        except ValueError:
+            pass
+        try:
+            return float(raw.replace("inf", "Infinity")) if raw.lstrip("+-") in ("inf", "nan") else float(raw)
+        except ValueError:
+            return raw
+
+    def parse(self):
+        root = cur = {}
+        t = self.t
+        while True:
+            self.ws(True)
+            if self.i >= len(t):
+                return root
+            if t[self.i] == "[":
+                self.i += 1
+                self.ws()
+                cur = root
+                for part in self.key():
+                    cur = cur.setdefault(part, {})
+                self.ws()
+                self.i += 1                                              # ']'
+            else:
+                k = self.key()
+                self.ws(); self.i += 1                                   # '='
+                _put(cur, k, self.value())
+            while self.i < len(t) and t[self.i] != "\n":                # rest of the line (comment)
+                self.i += 1
+
+
+def _put(d, parts, v):
+    for p in parts[:-1]:
+        d = d.setdefault(p, {})
+    d[parts[-1]] = v
+
+
+def _mini_toml(text):
+    try:
+        return _Mini(text).parse()
+    except (IndexError, ValueError) as e:
+        raise ValueError("invalid TOML: %s" % e)
 
 
 def _load(path):
     with open(path, "rb") as f:
         text = f.read().decode()
     return _toml.loads(text) if _toml else _mini_toml(text)
+
+
+def _num(v, default):
+    """float(v), or `default` for a missing / hand-edited non-numeric setting (a typo must not take the whole shell down)."""
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
 
 
 def _merge(base, over):
@@ -57,10 +178,23 @@ def _merge(base, over):
     return out
 
 
+_BAD_COLOURS = set()
+
+
 def hex_rgba(h, a=None):
-    h = h.lstrip("#")
-    r, g, b = (int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
-    al = int(h[6:8], 16) / 255.0 if len(h) >= 8 else 1.0
+    """"#rgb" / "#rrggbb" / "#rrggbbaa" -> (r, g, b, a) floats. A value that is not a colour (a typo in a hand-edited theme or settings
+    file) gives neutral grey and one warning instead of raising: this runs inside the window manager's main loop, where an exception
+    used to kill the WM, and the restart after the crash read the same bad value and died again."""
+    s = str(h).strip().lstrip("#")
+    if len(s) == 3:
+        s = "".join(c * 2 for c in s)
+    if len(s) not in (6, 8) or any(c not in "0123456789abcdefABCDEF" for c in s):
+        if s not in _BAD_COLOURS:
+            _BAD_COLOURS.add(s)
+            print("glitterde: ignoring invalid colour %r (using grey)" % (h,), file=__import__("sys").stderr)
+        return (0.5, 0.5, 0.5, 1.0 if a is None else a)
+    r, g, b = (int(s[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    al = int(s[6:8], 16) / 255.0 if len(s) >= 8 else 1.0
     return (r, g, b, al if a is None else a)
 
 
@@ -77,7 +211,7 @@ class Theme:
             pass
         self.root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         ap = self.meta.get("appearance", {})
-        self.radius_scale = float(ap.get("radius_scale", 1.0))
+        self.radius_scale = _num(ap.get("radius_scale"), 1.0)
         self.theme_id = os.path.basename(os.path.normpath(theme_dir))
         self.transparency = bool(ap.get("transparency", True))
         self.blur = bool(ap.get("blur", True))
@@ -86,14 +220,14 @@ class Theme:
         ua = self.user.get("appearance", {})
         self.transparency = bool(ua.get("transparency", self.transparency))
         self.blur = bool(ua.get("blur", self.blur))
-        self.radius_scale *= float(ua.get("radius_scale", 1.0))
-        self.glass_opacity = float(ua.get("glass_opacity", 1.0))
+        self.radius_scale *= _num(ua.get("radius_scale"), 1.0)
+        self.glass_opacity = _num(ua.get("glass_opacity"), 1.0)
         self.blur_level = ua.get("blur_level", "normal")
         if self.blur_level == "off":
             self.blur = False
         acc = self.user.get("accent", {}).get("primary")
-        if acc:
-            self.pal["accent"]["primary"] = acc
+        if acc and isinstance(acc, str) and len(acc.lstrip("#")) in (3, 6, 8) and all(c in "0123456789abcdefABCDEF" for c in acc.lstrip("#")):
+            self.pal["accent"]["primary"] = acc                # an invalid accent in settings.toml is ignored, not a crash
         if os.environ.get("GLITTERDE_REDUCED_EFFECTS"):
             self.transparency = self.blur = False
 

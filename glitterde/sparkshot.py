@@ -102,6 +102,7 @@ class SparkShot(appkit.GlassWindow):
 
     def _choose_folder(self):
         d = Gtk.FileChooserDialog(title="Save screenshots to", transient_for=self, action=Gtk.FileChooserAction.SELECT_FOLDER)
+        appkit.style_stock_dialog(d)
         d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("Choose", Gtk.ResponseType.OK); d.set_current_folder(self.folder)
         if d.run() == Gtk.ResponseType.OK and d.get_filename():
             self.folder = d.get_filename(); config.set("screenshot", "folder", self.folder); self.folder_btn.set_label(self._short(self.folder))
@@ -204,6 +205,7 @@ class SparkShot(appkit.GlassWindow):
 
     def _save_as(self, *_):
         d = Gtk.FileChooserDialog(title="Save as", transient_for=self, action=Gtk.FileChooserAction.SAVE)
+        appkit.style_stock_dialog(d)
         d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("Save", Gtk.ResponseType.OK)
         d.set_do_overwrite_confirmation(True); d.set_current_name(os.path.basename(self.path)); d.set_current_folder(os.path.dirname(self.path))
         if d.run() == Gtk.ResponseType.OK and d.get_filename():

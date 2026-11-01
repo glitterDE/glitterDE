@@ -352,20 +352,19 @@ class Welcome(Gtk.Window):
     # ------------------------------------------------------------------ finish
     def _finish(self, skip=False):
         try:
+            ch = {"shell": {"welcomed": True, "setup_done": True}}
             if not skip:
                 a = self.ans
+                ch.update({"appearance": {"theme": a["theme"], "color_scheme": a["scheme"]},
+                           "panel": {"position": a["panel"], "clock_24h": a["clock24"], "show_greeting": a["greeting"]},
+                           "dock": {"position": a["dock"]},
+                           "widgets": {"enabled": ",".join(k for k, *_ in WIDGETS if k in a["widgets"])},
+                           "cursor": {"size": int(a["cursor"])}})
                 if a["name"]:
-                    config.set("user", "name", a["name"])
-                config.set("appearance", "theme", a["theme"])
-                prefs.set("appearance.color_scheme", a["scheme"])
-                prefs.set("panel.position", a["panel"]); prefs.set("dock.position", a["dock"])
-                prefs.set("panel.clock_24h", a["clock24"]); prefs.set("panel.show_greeting", a["greeting"])
+                    ch["user"] = {"name": a["name"]}
                 if a["wallpaper"]:
-                    config.set("wallpaper", "path", os.path.abspath(a["wallpaper"]))
-                config.set("widgets", "enabled", ",".join(k for k, *_ in WIDGETS if k in a["widgets"]))
-                config.set("cursor", "size", int(a["cursor"]))
-            config.set("shell", "welcomed", True)
-            config.set("shell", "setup_done", True)
+                    ch["wallpaper"] = {"path": os.path.abspath(a["wallpaper"])}
+            config.update(ch)            # ONE write: it used to be a dozen, each making the shell and the WM reload their settings
         finally:
             Gtk.main_quit()
 

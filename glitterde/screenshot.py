@@ -3,7 +3,7 @@
     glitterde-screenshot [--full | --area | --window] [--delay SECONDS] [--copy] [-o FILE]
 
 Default: whole screen, saved to ~/Pictures/Screenshots/Screenshot_<date>_<time>.png, and a notification says where.
-Print Screen (handled by glitter-wm) opens the Screenshot window (--ui).
+Print Screen and Super+Shift+S (handled by glitter-wm) open the Screenshot window (--ui).
 Region mode freezes the screen, dims it, and lets you drag a rectangle (Esc / right-click cancels).
 """
 import argparse
@@ -49,21 +49,50 @@ def shot_folder():
         chosen = config.load().get("screenshot", {}).get("folder")
     except Exception:
         chosen = None
-    d = chosen or os.path.join(GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES) or os.path.expanduser("~/Pictures"), "Screenshots")
-    os.makedirs(d, exist_ok=True)
-    return d
+    fallback = os.path.join(GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES) or os.path.expanduser("~/Pictures"), "Screenshots")
+    for d in (os.path.expanduser(str(chosen)) if chosen else None, fallback):          # "~/Shots" typed by hand must not make a folder called "~"
+        if not d:
+            continue
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            continue
+        if os.access(d, os.W_OK):
+            return d                                                                 # a deleted / read-only chosen folder falls back instead of failing
+    return os.path.expanduser("~")
+
+
+def unique_path(path):
+    """path, or path with _2, _3 ... before the extension when it already exists (two shots in the same second used to overwrite each other)."""
+    base, ext = os.path.splitext(path)
+    n = 1
+    while os.path.exists(path):
+        n += 1
+        path = "%s_%d%s" % (base, n, ext)
+    return path
 
 
 def default_path():
-    return os.path.join(shot_folder(), time.strftime("Screenshot_%Y-%m-%d_%H-%M-%S.png"))
+    return unique_path(os.path.join(shot_folder(), time.strftime("Screenshot_%Y-%m-%d_%H-%M-%S.png")))
+
+
+def write_png(pb, out):
+    """Save the picture; tell the user (and return False) instead of dying silently when the disk or folder refuses it."""
+    try:
+        pb.savev(out, "png", [], [])
+        return True
+    except GLib.Error as e:
+        print("glitterde-screenshot: could not save %s: %s" % (out, e.message), file=sys.stderr)
+        notify("Could not save the screenshot", "%s\n%s" % (out, e.message))
+        return False
 
 
 def save_pixbuf(pb, copy=False, out=None):
     """Write the picture, announce it, optionally copy it to the clipboard, then end the main loop (after a while if a clipboard owner is needed)."""
     out = out or default_path()
-    pb.savev(out, "png", [], [])
-    print(out)
-    notify("Screenshot saved", out, out)
+    if write_png(pb, out):
+        print(out)
+        notify("Screenshot saved", out, out)
     if copy:
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD); cb.set_image(pb); cb.store()
         GLib.timeout_add_seconds(120, Gtk.main_quit)              # stay alive so the clipboard content can be pasted
@@ -156,14 +185,14 @@ def main(argv=None):
         from .sparkshot import main as ui
         return ui()
     out = args.output or default_path()
-    state = {}
 
     def save(pb):
         if pb is None:
+            notify("Nothing to capture", "The area or window is outside the screen.")
             Gtk.main_quit(); return
-        pb.savev(out, "png", [], [])
-        print(out)
-        notify("Screenshot saved", out, out)
+        if write_png(pb, out):
+            print(out)
+            notify("Screenshot saved", out, out)
         if args.copy:
             cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD); cb.set_image(pb); cb.store()
             GLib.timeout_add_seconds(120, Gtk.main_quit)          # stay alive so the clipboard content can be pasted

@@ -52,6 +52,11 @@ def panel_class():
     return "darkpanel" if is_dark() else "lightpanel"
 
 
+def menu_material():
+    """Material for menus, popups and flyouts: light glass under the light scheme, dark glass under the dark one."""
+    return "window_dark" if is_dark() else "window_light"
+
+
 def app_material(name):
     """Map the light app material to its dark counterpart when the dark scheme is active."""
     return "window_dark" if (name == "window_light" and is_dark()) else name

@@ -15,6 +15,7 @@ gi.require_version("PangoCairo", "1.0")
 from gi.repository import Pango, PangoCairo  # noqa: E402
 
 PI = math.pi
+WINDOW_RIM = (1.0, 1.0, 1.0, 0.30)     # the 1 px light edge of every framed window: titlebar (glitter-wm), body (GlassWindow) and the compositor use THIS one
 _WEIGHTS = {300: Pango.Weight.LIGHT, 400: Pango.Weight.NORMAL, 500: Pango.Weight.MEDIUM,
             600: Pango.Weight.SEMIBOLD, 700: Pango.Weight.BOLD}
 

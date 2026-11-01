@@ -29,14 +29,20 @@ echo "python: $(python3 --version 2>&1)  user: $(id -un)  host: $(hostname 2>/de
 
 # ---- logs: ~/.local/state/glitterde/{session,comp,wm,shell}.log (the previous session's logs are kept as *.log.old)
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/glitterde"; mkdir -p "$LOGDIR" 2>/dev/null
-for f in session comp wm shell; do [ -f "$LOGDIR/$f.log" ] && mv -f "$LOGDIR/$f.log" "$LOGDIR/$f.log.old"; done
+# (not session.log: it is already open and has this session's header in it; it is rotated by size at the top of this script)
+for f in comp wm shell; do [ -f "$LOGDIR/$f.log" ] && mv -f "$LOGDIR/$f.log" "$LOGDIR/$f.log.old"; done
 slog() { echo "$(date '+%F %T') $*" >> "$LOGDIR/session.log"; }
 
 # run a component; if it CRASHES (non-zero exit) start it again (max 5 times a minute). A clean exit (0) ends supervision.
+# Each supervisor remembers its own child and stops it on TERM, so ending this session never touches another session's processes.
 supervise() {
-    name=$1; shift; n=0; t0=$(date +%s)
+    name=$1; shift; n=0; t0=$(date +%s); child=""
+    trap '[ -n "$child" ] && kill "$child" 2>/dev/null; exit 0' TERM INT HUP
     while :; do
-        "$@" >> "$LOGDIR/$name.log" 2>&1; rc=$?
+        "$@" >> "$LOGDIR/$name.log" 2>&1 &
+        child=$!
+        wait "$child"; rc=$?
+        child=""
         [ "$rc" -eq 0 ] && { slog "$name exited cleanly"; return 0; }
         now=$(date +%s); [ $((now - t0)) -gt 60 ] && { n=0; t0=$now; }
         n=$((n + 1)); slog "$name died with status $rc (restart $n)"
@@ -69,12 +75,14 @@ PY
 
 "$BIN/glitterde-autostart" >/dev/null 2>&1 &
 # the shell is the session: a clean exit is "log out"; a crash restarts it instead of dropping you out
-supervise shell "$BIN/glitterde-shell" --as-desktop
-STATUS=$?
+supervise shell "$BIN/glitterde-shell" --as-desktop &
+SHELL_SUP=$!
+trap 'kill "$SHELL_SUP" 2>/dev/null' TERM INT HUP          # the display manager ends the session: stop the shell, then fall through to the tear-down
+wait "$SHELL_SUP"; STATUS=$?
 slog "shell finished with status $STATUS, ending session"
 
-# tear down: stop the supervisors, then the components they were running
+# tear down: stopping a supervisor stops the one component it runs (and only that one: no pkill by name, which also killed the
+# compositor and WM of any OTHER session of this user started from the same install)
 for p in $SUPS; do kill "$p" 2>/dev/null; done
-pkill -u "$(id -u)" -f "$BIN/glitter-comp" 2>/dev/null
-pkill -u "$(id -u)" -f "$BIN/glitter-wm" 2>/dev/null
+wait
 exit $STATUS

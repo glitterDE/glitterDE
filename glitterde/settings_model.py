@@ -127,11 +127,7 @@ def set(id, value):
 
 def reset(id):
     sec, key = id.split(".", 1)
-    d = config.load()
-    d.get(sec, {}).pop(key, None)
-    if sec in d and not d[sec]:
-        d.pop(sec)
-    config.save(d)
+    config.remove(sec, key)
     _cache["mt"] = None
 
 

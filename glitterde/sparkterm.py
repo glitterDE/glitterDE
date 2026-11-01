@@ -64,6 +64,8 @@ class SparkTerm(appkit.GlassWindow):
             self.new_tab()
 
     def new_tab(self, *_):
+        if Vte is None:                              # Ctrl+Shift+T without the VTE library used to raise AttributeError on None
+            return
         from gi.repository import Pango
         from . import config
         from .menus import GlassMenu
@@ -88,10 +90,20 @@ class SparkTerm(appkit.GlassWindow):
         except Exception:
             pass
         argv = self.command or [os.environ.get("SHELL") or "/bin/bash"]
+        def say_failed(msg):
+            # a missing shell or `sparkterm -e nosuchcommand` used to leave an empty terminal that never said why
+            t.feed(("\r\nCould not start %s: %s\r\n" % (argv[0], msg)).encode("utf-8", "replace"))
+
+        def spawned(term, pid, err, *_):
+            if err is not None or pid == -1:
+                say_failed(err.message if err is not None else "unknown error")
         try:
-            t.spawn_async(Vte.PtyFlags.DEFAULT, self.cwd, argv, None, GLib.SpawnFlags.SEARCH_PATH, None, None, -1, None, None)
+            t.spawn_async(Vte.PtyFlags.DEFAULT, self.cwd, argv, None, GLib.SpawnFlags.SEARCH_PATH, None, None, -1, None, spawned)
         except TypeError:
-            t.spawn_sync(Vte.PtyFlags.DEFAULT, self.cwd, argv, None, GLib.SpawnFlags.SEARCH_PATH, None, None, None)
+            try:
+                t.spawn_sync(Vte.PtyFlags.DEFAULT, self.cwd, argv, None, GLib.SpawnFlags.SEARCH_PATH, None, None, None)
+            except GLib.Error as e:
+                say_failed(e.message)
 
         def press(term, ev):
             if ev.button == 1 and ev.state & Gdk.ModifierType.CONTROL_MASK:
@@ -105,8 +117,8 @@ class SparkTerm(appkit.GlassWindow):
                            ("item", "New tab", self.new_tab), ("sep",),
                            ("item", "Zoom in", lambda: self.zoom(0.1)), ("item", "Zoom out", lambda: self.zoom(-0.1)),
                            ("item", "Reset zoom", lambda: self.zoom(0)), ("sep",),
-                           ("item", "Clear scrollback", lambda: term.reset(True, True))],
-                          theme=self.th).popup_at(ev.x_root, ev.y_root)
+                           ("item", "Clear scrollback", lambda: term.feed(b"\x1b[3J"))],      # ED 3: history only. reset() also wiped the screen and the state of any running full-screen program
+                          theme=self.th, dark=True).popup_at(ev.x_root, ev.y_root)      # the terminal is always dark, so is its menu
                 return True
             return False
         t.connect("button-press-event", press)

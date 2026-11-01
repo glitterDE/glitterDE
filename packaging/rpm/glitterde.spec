@@ -3,7 +3,7 @@
 %global _build_id_links none
 
 Name:           glitterde
-Version:        %{?pkgversion}%{!?pkgversion:0.13.2}
+Version:        %{?pkgversion}%{!?pkgversion:0.14.0}
 Release:        1%{?dist}
 Summary:        A customisable but pretty desktop environment :3
 License:        GPL-3.0-only
@@ -96,6 +96,10 @@ make install DESTDIR=%{buildroot} PREFIX=%{_prefix} LIBDIR=%{_prefix}/lib/glitte
 %{_datadir}/doc/glitterde
 
 %changelog
+* Sun Nov 1 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.14.0-1
+- Show progress window during file operations
+- Redesign Wi-Fi and Bluetooth settings pages
+- General bug fixes
 * Wed Oct 28 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.13.2-1
 - Fix multiple bugs with experience and theming
 * Tue Oct 27 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.13.1-1

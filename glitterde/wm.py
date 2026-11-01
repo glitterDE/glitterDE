@@ -59,7 +59,8 @@ class Client:
         self.cls = ""
         self.desktop = 0
         self.minimized = self.maximized = self.fullscreen = False
-        self.saved = None
+        self.saved = None                    # geometry before maximising (x, y, w, h)
+        self.fs_saved = None                 # geometry + decoration before fullscreen (x, y, w, h, decorated): kept apart from `saved`
         self.is_desktop = False
         self.decorated = True
         self.hover = None
@@ -73,10 +74,12 @@ class Client:
         self.minw = self.minh = 0            # WM_NORMAL_HINTS minimum client size
         self._cp = None                      # last compositor hints written (skip identical rewrites)
         self.ext = (0, 0, 0, 0)              # _GTK_FRAME_EXTENTS (left, right, top, bottom): the transparent shadow a CSD window draws around itself
+        self.types = []                      # _NET_WM_WINDOW_TYPE atoms
         self.unframed_type = False           # menus, docks, tooltips ...: never framed, whatever hints they carry
         self.above = False                   # _NET_WM_STATE_ABOVE ("always on top")
         self.icon_surf = None                # the app icon shown in the titlebar (cairo surface) ...
         self.icon_ready = False              # ... and whether it has been looked up yet
+        self.glass = False                   # the client paints its own glass body (declared glitter-material role): whole frame is blurred
 
     @property
     def fw(self):
@@ -118,11 +121,15 @@ class WM:
             "_NET_WM_WINDOW_TYPE_DIALOG _NET_WM_WINDOW_TYPE_UTILITY _NET_WM_WINDOW_TYPE_SPLASH _NET_WM_WINDOW_TYPE_MENU "
             "_NET_WM_WINDOW_TYPE_TOOLTIP _NET_WM_WINDOW_TYPE_NOTIFICATION _NET_WM_WINDOW_TYPE_POPUP_MENU "
             "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU _NET_WM_WINDOW_TYPE_COMBO _NET_WM_WINDOW_TYPE_DND _NET_WM_WINDOW_TYPE_TOOLBAR "
-            "_NET_WM_STATE_SKIP_TASKBAR _GLITTER_LAUNCHER _GLITTER_MONITORS _NET_MOVERESIZE_WINDOW _NET_WM_MOVERESIZE \n            _GLITTER_BLUR _GLITTER_SHADOW _GLITTER_RADIUS _GLITTER_BODY_Y _GLITTER_OPAQUE WM_WINDOW_ROLE _MOTIF_WM_HINTS _GTK_FRAME_EXTENTS _NET_WM_STATE_ABOVE _NET_WM_ICON _GLITTER_WINMENU _GLITTER_DOCKAPP").split()}
+            "_NET_WM_STATE_SKIP_TASKBAR _GLITTER_LAUNCHER _GLITTER_MONITORS _NET_MOVERESIZE_WINDOW _NET_WM_MOVERESIZE \n            _GLITTER_BLUR _GLITTER_SHADOW _GLITTER_RADIUS _GLITTER_BODY_Y _GLITTER_OPAQUE _GLITTER_BLUR_H _GLITTER_RIM _GLITTER_CLIP WM_WINDOW_ROLE _MOTIF_WM_HINTS _GTK_FRAME_EXTENTS _NET_WM_STATE_ABOVE _NET_WM_ICON _GLITTER_WINMENU _GLITTER_DOCKAPP").split()}
         A = self.A
         self.unframed_types = {A[k] for k in A if k.startswith("_NET_WM_WINDOW_TYPE_") and k.split("TYPE_")[1] in
                                ("DOCK", "SPLASH", "MENU", "TOOLTIP", "NOTIFICATION", "POPUP_MENU", "DROPDOWN_MENU",
                                 "COMBO", "DND", "TOOLBAR")}
+        # corner radius (px at 100% roundness) and shadow for popup-ish windows of OTHER apps; ours (POPUP_RADIUS) keep their own values
+        self.type_round = {A["_NET_WM_WINDOW_TYPE_" + k]: v for k, v in (
+            ("MENU", (10, True)), ("POPUP_MENU", (10, True)), ("DROPDOWN_MENU", (10, True)), ("COMBO", (10, True)),
+            ("TOOLTIP", (8, False)), ("NOTIFICATION", (14, True)), ("SPLASH", (RAD, True)), ("TOOLBAR", (10, False)), ("DND", (8, False)))}
         # become the WM (fails with BadAccess if another one runs)
         self._fail = None
         self.d.set_error_handler(self._catch_redirect)
@@ -177,22 +184,81 @@ class WM:
         print("glitter-wm: compositor %s" % ("detected: translucent glass frames" if self.comp else "not found: pseudo-glass frames"),
               file=sys.stderr)
 
+    POPUP_RADIUS = {"glitterde-dock": 26, "glitterde-menu": 14, "glitterde-popup": 20, "glitterde-dialog": 14}
+
+    def _type_round(self, types):
+        """(radius, shadow) a foreign popup-like window (menu, tooltip, splash ...) gets from its window type, or None."""
+        for t in types:
+            if t in self.type_round:
+                return self.type_round[t]
+        return None
+
     def _comp_props(self, c):
         if not self.comp or c.is_desktop:
             return
         full = c.maximized or c.fullscreen
-        pop = c.cls in ("glitterde-popup", "glitterde-menu", "glitterde-dock")
-        blur = self.blur_lvl if ((c.cls in MATERIAL or pop) and not c.fullscreen) else 0
-        pr = {"glitterde-dock": 26, "glitterde-menu": 14, "glitterde-popup": 20}
-        rad = 0 if full else (RAD if c.decorated else (self.theme.rad(pr[c.cls]) if pop else 0))
-        shadow = int(self.shadow_on and not full and (c.decorated or pop))
+        pop = c.cls in self.POPUP_RADIUS
+        # frameless apps without a shadow of their own (Firefox, Chrome, Electron, Qt ...) paint square corners: the compositor rounds them.
+        # GTK client-side windows (they declare _GTK_FRAME_EXTENTS) draw their own rounded corners and shadow.
+        own_csd = c.csd and not c.glass and not any(c.ext)
+        typed = None if (pop or c.decorated or c.csd or c.is_dock or c.glass) else self._type_round(c.types)
+        blur_on = (c.glass or pop or c.decorated) and not c.fullscreen
+        blur = self.blur_lvl if blur_on else 0
+        if full:
+            rad = 0
+        elif c.decorated or own_csd:
+            rad = RAD
+        elif pop:
+            rad = self.theme.rad(self.POPUP_RADIUS[c.cls])
+        elif typed:
+            rad = self.theme.rad(typed[0])
+        else:
+            rad = 0
+        shadow = int(self.shadow_on and not full and (c.decorated or pop or own_csd or bool(typed and typed[1])))
         opaque = (1 if scheme.is_dark() else 2) if c.fullscreen else 0       # fullscreen glass must not show the desktop behind it
-        vals = (int(blur), shadow, int(rad), int(c.off[1]), opaque)      # last: where the client area starts inside the frame (the compositor's resize hold)
+        # foreign apps paint an opaque body: blur only the titlebar strip (not the whole window) and let the compositor draw the rim + round the corners
+        blur_h = TH if (c.decorated and not c.glass and not full) else 0
+        rim = 1 if (c.decorated and not c.glass and not full) else (2 if (own_csd and rad) else 0)
+        clip = int(rad > 0 and (own_csd or typed is not None))
+        vals = (int(blur), shadow, int(rad), int(c.off[1]), opaque, blur_h, rim, clip)
         if vals == c._cp:
             return                                   # nothing changed: every drag/resize step used to rewrite these (3 round trips)
         c._cp = vals
-        for atom, v in zip(("_GLITTER_BLUR", "_GLITTER_SHADOW", "_GLITTER_RADIUS", "_GLITTER_BODY_Y", "_GLITTER_OPAQUE"), vals):
+        for atom, v in zip(("_GLITTER_BLUR", "_GLITTER_SHADOW", "_GLITTER_RADIUS", "_GLITTER_BODY_Y", "_GLITTER_OPAQUE", "_GLITTER_BLUR_H", "_GLITTER_RIM",
+                            "_GLITTER_CLIP"), vals):
             c.frame.change_property(self.A[atom], Xatom.CARDINAL, 32, [v])
+
+    def on_map_notify(self, ev):
+        """Override-redirect popups of other apps (context menus, tooltips, combo lists) never go through manage(), so they never got
+        rounded corners. Give them the radius for their window type, unless they draw their own (_GTK_FRAME_EXTENTS) or are one of ours."""
+        w = ev.window
+        if not (self.comp and ev.override) or w.id in self.by_win or w.id in self.by_frame or w.id == self.check.id:
+            return
+        if getattr(ev, "event", None) is not None and ev.event.id != self.root.id:
+            return
+        spec = self._type_round(self._types(w))
+        if not spec or self._frame_extents(w) != (0, 0, 0, 0):
+            return
+        cls = w.get_wm_class()
+        if cls and (cls[1] or "").lower() in self.POPUP_RADIUS:
+            return
+        rad = self.theme.rad(spec[0])
+        if rad <= 0:
+            return
+        for atom, v in (("_GLITTER_RADIUS", rad), ("_GLITTER_CLIP", 1), ("_GLITTER_SHADOW", int(self.shadow_on and spec[1])), ("_GLITTER_RIM", 2)):
+            w.change_property(self.A[atom], Xatom.CARDINAL, 32, [v])
+        self.d.flush()
+
+    def _chrome_material(self):
+        """Titlebar material for windows that are not glass themselves (Firefox, Qt apps, stock dialogs ...): follows light/dark."""
+        return scheme.menu_material()
+
+    def _restyle_clients(self):
+        """The colour scheme or theme changed: windows that are not glass follow it without being restarted."""
+        for c in self.clients:
+            if c.decorated and not c.glass:
+                c.mat = self._chrome_material()
+            c._cp = None
 
     def _client_material(self, win):
         """Material the app declared in WM_WINDOW_ROLE ("glitter-material:<name>"); None if it didn't."""
@@ -392,8 +458,11 @@ class WM:
         theme = config.cursor_theme()
         if theme:
             xc.XcursorSetTheme(self._xdpy, theme.encode())
-        if cfg.get("size"):
-            xc.XcursorSetDefaultSize(self._xdpy, int(cfg["size"]))
+        try:
+            if cfg.get("size"):
+                xc.XcursorSetDefaultSize(self._xdpy, int(cfg["size"]))
+        except (TypeError, ValueError):
+            pass                                           # a hand-edited, non-numeric size must not break cursors
         new = {}
         for key, name in self.XC_NAMES.items():
             cid = xc.XcursorLibraryLoadCursor(self._xdpy, name.encode())
@@ -475,10 +544,12 @@ class WM:
 
     def _grab_keys(self):
         self.keys = {}
+        self.launcher_kcs = set()                         # keycodes of the bare-Super keys (matched by code on release, see on_key_release)
         self.super_mask = self._detect_super_mask()
         mods = [0, X.LockMask, X.Mod2Mask, X.LockMask | X.Mod2Mask]
         for name, base, tag in (("F4", X.Mod1Mask, "close"), ("Tab", X.Mod1Mask, "cycle"), ("Super_L", 0, "launcher"),
                                 ("Super_R", 0, "launcher"), ("Print", 0, "shot-menu"),
+                                ("s", self.super_mask | X.ShiftMask, "shot-menu"),      # Super+Shift+S: the screenshot bar, like Print
                                 *[(k, self.super_mask, "super-" + t) for k, t in self.SUPER_KEYS.items()]):
             kc = self.d.keysym_to_keycode(XK.string_to_keysym(name))
             if not kc:
@@ -486,6 +557,8 @@ class WM:
             for m in mods:
                 self.root.grab_key(kc, base | m, True, X.GrabModeAsync, X.GrabModeAsync)
                 self.keys[(kc, base)] = tag
+            if tag == "launcher":
+                self.launcher_kcs.add(kc)
 
     def _adopt_existing(self):
         for w in self.root.query_tree().children:
@@ -559,6 +632,10 @@ class WM:
         c.ext = self._frame_extents(c.win) if csd else (0, 0, 0, 0)
         if csd != c.csd:
             self._redecorate(c)
+        else:                                    # same decoration, but the shadow insets changed: whether the compositor rounds it depends on them
+            c._cp = None
+            self._comp_props(c)
+            self.d.flush()
 
     def _redecorate(self, c):
         win, desk, mini, mx, saved = c.win, c.desktop, c.minimized, c.maximized, c.saved
@@ -763,7 +840,7 @@ class WM:
             return self.by_win[win.id]
         try:
             g = win.get_geometry()
-        except error.BadWindow:
+        except (error.BadWindow, error.BadDrawable):       # GetGeometry reports a vanished window as BadDrawable, not BadWindow
             return None
         types = self._types(win)
         try:                                              # read the initial state NOW: later steps rewrite _NET_WM_STATE
@@ -782,6 +859,7 @@ class WM:
         if c.decorated and self._client_decorates_itself(win):     # CSD / frameless apps draw their own titlebar
             c.decorated, c.csd = False, True
         c.ext = self._frame_extents(win) if c.csd else (0, 0, 0, 0)
+        c.types = types
         c.title = self._text(win, self.A["_NET_WM_NAME"], Xatom.WM_NAME)
         try:                                              # honour the client's minimum size when resizing
             nh = win.get_wm_normal_hints()
@@ -791,7 +869,9 @@ class WM:
             pass
         cls = win.get_wm_class()
         c.cls = (cls[1] if cls else "").lower()
-        c.mat = self._client_material(win) or MATERIAL.get(c.cls, "window_glass")
+        declared = self._client_material(win)
+        c.glass = declared is not None
+        c.mat = declared or self._chrome_material()
         if os.environ.get("GLITTERDE_DEBUG"):
             print("glitter-wm: %s material=%s" % (c.cls, c.mat), file=sys.stderr)
         c.bw = 0 if ((self.comp and c.decorated) or c.csd) else BW      # compositor: seamless window, no border ring (CSD windows have no WM border at all)
@@ -849,7 +929,7 @@ class WM:
         self.clients.append(c); self.stack.append(c)
         self.by_win[win.id] = c; self.by_frame[c.frame.id] = c
         self._shape(c)
-        if not c.decorated and not c.is_desktop and not self.comp:
+        if not c.decorated and not c.is_desktop:
             try:
                 c.win.shape_select_input(1)
             except Exception:
@@ -935,18 +1015,25 @@ class WM:
         self._prop(c.win, "_NET_WM_STATE", Xatom.ATOM, 32, keep)
 
     # ------------------------------------------------------------- geometry
-    def _mirror_client_shape(self, c):
-        """Undecorated windows (popups, dock, CSD apps): give the frame the same outline as the client."""
-        try:
-            shape.Combine(display=self.d.display, opcode=self.d.display.get_extension_major(shape.extname),
-                          destination_window=c.frame, source_window=c.win, operation=shape.SO.Set,
-                          destination_kind=shape.SK.Bounding, source_kind=shape.SK.Bounding, x_offset=0, y_offset=0)
-        except Exception:
-            pass
+    def _mirror_client_shape(self, c, bounding=True):
+        """Undecorated windows (popups, dock, CSD apps): give the frame the same outline AND input region as the client. Without the
+        input part the frame swallowed every click in the transparent shadow a client-side-decorated window draws around itself, so
+        windows lying under that shadow could not be clicked."""
+        for kind, on in ((shape.SK.Bounding, bounding), (shape.SK.Input, True)):
+            if not on:
+                continue
+            try:
+                shape.Combine(display=self.d.display, opcode=self.d.display.get_extension_major(shape.extname),
+                              destination_window=c.frame, source_window=c.win, operation=shape.SO.Set,
+                              destination_kind=kind, source_kind=kind, x_offset=0, y_offset=0)
+            except Exception as e:
+                print("glitter-wm: shape mirror failed: %r" % e, file=sys.stderr)
 
     def _shape(self, c):
         if self.comp and not c.is_desktop:
-            return                      # alpha provides the rounding
+            if not c.decorated:
+                self._mirror_client_shape(c, bounding=False)     # alpha provides the rounding, but clicks in a client-side shadow must fall through
+            return
         if not c.decorated and not c.is_desktop:
             self._mirror_client_shape(c)
             return
@@ -1001,11 +1088,14 @@ class WM:
             return
         c.fullscreen = on
         if on:
-            c.saved = (c.x, c.y, c.w, c.h, c.decorated)
+            c.fs_saved = (c.x, c.y, c.w, c.h, c.decorated)
             mx, my, mw, mh = next((m for m in self.mons if m[0] <= c.x + c.fw // 2 < m[0] + m[2] and m[1] <= c.y + 10 < m[1] + m[3]), self.mons[0])
             c.decorated, c.x, c.y, c.w, c.h = False, mx, my, mw, mh      # fullscreen covers its own monitor, not the whole root
-        elif c.saved:
-            c.x, c.y, c.w, c.h, c.decorated = c.saved
+        elif c.fs_saved:
+            c.x, c.y, c.w, c.h, c.decorated = c.fs_saved
+            c.fs_saved = None
+            if c.maximized:                               # left fullscreen while maximised: fit the current work area again
+                self._fit_max(c)
         self._set_wm_state(c, 1)
         self.apply_geometry(c)
         self.raise_(c, force=True)                        # on: cover the docks; off: put the docks back on top
@@ -1152,6 +1242,8 @@ class WM:
             c.frame.unmap()
             if self.focus_c is c:
                 self.focus_c = None
+        elif not c.minimized:
+            c.frame.map()                                  # moved onto the desktop we are looking at: it must appear
         self._publish()
 
     # ------------------------------------------------------------- painting
@@ -1262,7 +1354,7 @@ class WM:
         cr = cairo.Context(surf)
         cr.set_antialias(cairo.ANTIALIAS_BEST)
         light = c.mat == "window_light"
-        ink = (0.165, 0.176, 0.43, 1) if light else (1, 1, 1, 1)
+        ink = (0.165, 0.176, 0.43, 1) if light else (0.93, 0.92, 0.98, 1) if c.mat == "window_dark" else (1, 1, 1, 1)
         rad = 0 if (c.maximized or c.fullscreen) else RAD
         osc = 1.0 if (c.focused or tb_only) else self.inactive     # seamless: body never dims, so the bar must not either
         m = self.theme.material(c.mat)
@@ -1278,12 +1370,12 @@ class WM:
         if not tb_only:
             cr.set_source(gfx.lin(0, 0, 0, TH, [(0, (1, 1, 1, 0.14)), (1, (1, 1, 1, 0.02))]))
             cr.rectangle(0, 0, fw, TH); cr.fill()
-        rim = (1, 1, 1, 0.65 if c.focused else 0.38)
+        rim = gfx.WINDOW_RIM                              # identical to the body's rim: no brighter titlebar edge, no focus-dependent flicker
         if tb_only:
-            gfx.rrect_var(cr, 0.5, 0.5, fw - 1, fh - 1, rad, rad, 0, 0)
-            cr.set_source_rgba(*rim); cr.set_line_width(1.2); cr.stroke()
+            gfx.rrect_var(cr, 0.5, 0.5, fw - 1, TH + 40, rad, rad, 0, 0)       # top + upper sides only; the body draws the rest of the same line
+            cr.set_source_rgba(*rim); cr.set_line_width(1.0); cr.stroke()
         else:
-            gfx.stroke_rrect(cr, 0, 0, fw, fh, rad, rim, 1.2)
+            gfx.stroke_rrect(cr, 0, 0, fw, fh, rad, rim, 1.0)
         self._paint_chrome(cr, c, ink, light)
         surf.flush()
         buf = bytes(surf.get_data())
@@ -1348,8 +1440,10 @@ class WM:
                 mt = self._mtime()
                 if mt != self._settings_mtime:
                     self._settings_mtime = mt
+                    scheme.refresh()
                     self.load_theme()
                     self._cursors()
+                    self._restyle_clients()
                     self.reload_all()
 
     def handle(self, ev):
@@ -1361,15 +1455,15 @@ class WM:
                 self.d.flush()
             return
         h = {X.MapRequest: self.on_map_request, X.ConfigureRequest: self.on_configure_request,
-             X.UnmapNotify: self.on_unmap, X.DestroyNotify: self.on_destroy, X.PropertyNotify: self.on_property,
+             X.UnmapNotify: self.on_unmap, X.MapNotify: self.on_map_notify, X.DestroyNotify: self.on_destroy, X.PropertyNotify: self.on_property,
              X.ClientMessage: self.on_client_message, X.ButtonPress: self.on_button, X.ButtonRelease: self.on_release,
              X.MotionNotify: self.on_motion, X.Expose: self.on_expose, X.KeyPress: self.on_key, X.KeyRelease: self.on_key_release,
              X.LeaveNotify: self.on_leave, X.EnterNotify: self.on_enter}.get(t)
         if h:
             try:
                 h(ev)
-            except error.BadWindow:
-                pass
+            except (error.BadWindow, error.BadDrawable):
+                pass                           # the window died while we were handling its event: normal in X
             except Exception:
                 import traceback
                 traceback.print_exc()          # keep the session alive; the traceback goes to the log
@@ -1519,6 +1613,7 @@ class WM:
             if len(order) > 1:
                 self.focus(order[0])
         elif tag and tag.startswith("shot-"):
+            self._super_used = True                      # Super+Shift+S: Super was part of a chord, so releasing it must not open the launcher
             tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "glitterde-screenshot")
             try:
                 subprocess.Popen([sys.executable, tool, "--ui"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -1535,8 +1630,11 @@ class WM:
         return state & (X.ShiftMask | X.ControlMask | X.Mod1Mask | getattr(self, "super_mask", X.Mod4Mask))
 
     def on_key_release(self, ev):
-        base = self._key_base(ev.state)
-        if self.keys.get((ev.detail, base)) == "launcher" and getattr(self, "_super_down", False):
+        if os.environ.get('GLITTERDE_DEBUG'):
+            print('wm key-release', ev.detail, ev.state, self._super_down if hasattr(self,'_super_down') else None, sorted(self.launcher_kcs), file=sys.stderr)
+        # The release event's state still contains the Super bit of the very key being released, so a (keycode, state) lookup never
+        # matched and a bare tap of Super never opened the launcher. Match on the keycode alone.
+        if ev.detail in getattr(self, "launcher_kcs", ()) and getattr(self, "_super_down", False):
             self._super_down = False
             if not self._super_used:                      # held-down Super autorepeats as release+press: wait a moment to be sure it is a real release
                 self._super_launch_at = time.time() + 0.03
@@ -1549,6 +1647,8 @@ class WM:
 
     def _open_launcher(self):
         sh = next((x for x in self.clients if x.is_desktop), None)
+        if os.environ.get('GLITTERDE_DEBUG'):
+            print('wm open-launcher shell=', sh, file=sys.stderr)
         if sh:
             self._launch_n = getattr(self, "_launch_n", 0) + 1       # property change = reliable signal for GTK
             sh.win.change_property(self.A["_GLITTER_LAUNCHER"], Xatom.CARDINAL, 32, [self._launch_n])

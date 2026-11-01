@@ -17,6 +17,7 @@ from .filesops import FileOps
 from .menus import GlassMenu
 from .widgets import popup_menu, Ico, icon_button, label, search_overlay
 
+from . import scheme
 from .scheme import ink
 FOLDER_COLORS = {"Documents": ((.98, .68, 1, 1), (.84, .40, .95, 1)), "Downloads": ((.68, .88, 1, 1), (.45, .72, 1, 1)),
                  "Music": ((.82, .64, 1, 1), (.66, .46, .95, 1)), "Pictures": ((.66, .70, 1, 1), (.46, .52, .96, 1)),
@@ -71,10 +72,11 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         self.b_hid.connect("clicked", lambda b: self._main_menu(b))
         self.b_view = icon_button("grid", 15, "", self.toggle_view, color=ink(), pad=8)
         self.b_tab = icon_button("plus", 15, "New tab (Ctrl+T)", self.new_tab, color=ink(), pad=8)
-        tb.pack_start(self.path, True, True, 4); tb.pack_start(search_overlay(self.search, (0.165, 0.176, 0.43, 0.8)), False, False, 0)
+        tb.pack_start(self.path, True, True, 4); tb.pack_start(search_overlay(self.search, ink()[:3] + (0.8,)), False, False, 0)
         tb.pack_start(self.b_tab, False, False, 0); tb.pack_start(self.b_view, False, False, 0); tb.pack_start(self.b_hid, False, False, 0)
         outer.pack_start(tb, False, False, 0)
-        self.tabstrip = Gtk.Box(spacing=4); self.tabstrip.set_no_show_all(True)          # only shown once there is more than one tab
+        self.tabstrip = Gtk.Box(spacing=6); self.tabstrip.set_no_show_all(True)          # only shown once there is more than one tab
+        self.tabstrip.set_margin_start(4); self.tabstrip.set_margin_end(4)
         outer.pack_start(self.tabstrip, False, False, 0)
 
         body = Gtk.Box(spacing=8)
@@ -148,9 +150,15 @@ class SparkFiles(FileOps, appkit.GlassWindow):
             col.connect("clicked", lambda c, k=key: self.header_sort(k))
             self.tree.append_column(col); self.cols[key] = col
         lsw = Gtk.ScrolledWindow(); lsw.add(self.tree); self._sw_list = lsw; lsw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        lbox = Gtk.Box(); lbox.set_border_width(8); lbox.pack_start(lsw, True, True, 0)
-        lbg = Gtk.EventBox(); lbg.set_visible_window(False); lbg.add(lbox)          # the 8 px gap around the list takes right-clicks too
+        lbox = Gtk.Box(); lbox.set_border_width(14); lbox.pack_start(lsw, True, True, 0)
+        lbg = Gtk.EventBox(); lbg.set_visible_window(False); lbg.add(lbox)          # the gap around the list takes right-clicks and drag-select
         lbg.connect("button-press-event", lambda w, ev: self._background_menu(ev) if ev.button == 3 else False)
+        self._lbg, self._lband_rect, self._lband_start = lbg, None, None
+        lbox.connect_after("draw", self._draw_lband)
+        self._lband_gesture = Gtk.GestureDrag.new(lbg); self._lband_gesture.set_button(1)
+        self._lband_gesture.connect("drag-begin", self._lband_begin)
+        self._lband_gesture.connect("drag-update", self._lband_update)
+        self._lband_gesture.connect("drag-end", self._lband_end)
         self.stack = Gtk.Stack(); self.stack.add_named(sw, "icons"); self.stack.add_named(lbg, "list")
         cwrap = Gtk.Box(); cwrap.get_style_context().add_class("inner"); cwrap.pack_start(self.stack, True, True, 0)
         body.pack_start(cwrap, True, True, 0)
@@ -167,18 +175,28 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         self.setup_dnd()
 
     def _style_list(self):
+        dark = scheme.is_dark()
+        sel = "rgba(168,150,255,0.46)" if dark else "rgba(96,108,255,0.40)"
+        sel_ink = "#ffffff" if dark else "#1f2160"
+        tab = "rgba(255,255,255,0.07)" if dark else "rgba(255,255,255,0.40)"
+        tab_hover = "rgba(255,255,255,0.14)" if dark else "rgba(96,108,255,0.16)"
+        tab_on = "rgba(168,150,255,0.34)" if dark else "rgba(96,108,255,0.30)"
+        tab_edge = "rgba(168,150,255,0.60)" if dark else "rgba(96,108,255,0.55)"
+        band_ink = "#ffffff" if dark else "#1f2160"
         css = Gtk.CssProvider()
-        css.load_from_data(b"""
-        treeview.filelist, treeview.filelist:selected { background: transparent; }
-        treeview.filelist { color: inherit; }
-        treeview.filelist:selected { background-color: alpha(#7a5cff, 0.28); border-radius: 8px; }
-        button.filetab { padding: 2px 6px; border-radius: 9px; background-image: none; box-shadow: none; border: 1px solid transparent; }
-        button.filetab.sel { background-color: alpha(#7a5cff, 0.28); }
-        button.filetab:hover { background-color: alpha(#7a5cff, 0.16); }
+        css.load_from_data(("""
+        treeview.view.filelist { background-color: transparent; background-image: none; }
+        treeview.view.filelist:selected, treeview.view.filelist:selected:focus { background-color: %s; color: %s; border-radius: 0; }
+        treeview.view.filelist header button { background: transparent; border: none; box-shadow: none; font-weight: 600; padding: 6px 0; }
+        .filetab { background-color: %s; border: 1px solid transparent; border-radius: 10px; padding: 1px 3px; }
+        .filetab:hover { background-color: %s; }
+        .filetab.sel { background-color: %s; border-color: %s; }
+        .filetab label { font-weight: 500; }
+        .filetab.sel label { font-weight: 700; color: %s; }
+        .filetab button { padding: 2px 6px; border-radius: 8px; }
         entry.error { border-color: #ff5c7a; box-shadow: 0 0 0 1px #ff5c7a; }
-        treeview.filelist header button { background: transparent; border: none; box-shadow: none; font-weight: 600; padding: 6px 0; }
-        """)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        """ % (sel, sel_ink, tab, tab_hover, tab_on, tab_edge, band_ink)).encode())
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_USER + 13)
 
     # ------------------------------------------------------------- views and sorting
     def _save_view(self):
@@ -231,6 +249,59 @@ class SparkFiles(FileOps, appkit.GlassWindow):
             self._draw_icon(_D(), cr, is_dir, name, ext)
             pb = self._row_icons[k] = Gdk.pixbuf_get_from_surface(surf, 0, 0, 28, 28)
         return pb
+
+    # drag-select from the gutter around the list view
+    def _lband_begin(self, g, x, y):
+        pos = self._lbg.translate_coordinates(self._sw_list, int(x), int(y))
+        a = self._sw_list.get_allocation()
+        if pos is not None and 0 <= pos[0] < a.width and 0 <= pos[1] < a.height:       # inside the list: GTK handles clicks and its own rubber band
+            g.set_state(Gtk.EventSequenceState.DENIED); self._lband_start = None; return
+        self._lband_start = (x, y)
+        ev = Gtk.get_current_event()
+        keep = bool(ev is not None and ev.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK))
+        sel = self.tree.get_selection()
+        self._lband_base = {tuple(p) for p in sel.get_selected_rows()[1]} if keep else set()
+        if not keep:
+            sel.unselect_all()
+        g.set_state(Gtk.EventSequenceState.CLAIMED)
+
+    def _lband_update(self, g, dx, dy):
+        if not self._lband_start:
+            return
+        x0, y0 = self._lband_start
+        r = (min(x0, x0 + dx), min(y0, y0 + dy), abs(dx), abs(dy))
+        self._lband_rect = r
+        sel = self.tree.get_selection()
+        vis = self.tree.get_visible_range()
+        if vis:
+            first, last = vis[0].get_indices()[0], vis[1].get_indices()[0]
+            lw = self._sw_list.get_allocation()
+            top = self._sw_list.translate_coordinates(self._lbg, 0, 0) or (0, 0)
+            for i in range(first, last + 1):
+                path = Gtk.TreePath.new_from_indices([i])
+                ra = self.tree.get_background_area(path, None)
+                wx, wy = self.tree.convert_bin_window_to_widget_coords(ra.x, ra.y)
+                pos = self.tree.translate_coordinates(self._lbg, wx, wy)
+                if pos is None:
+                    continue
+                y1, y2 = max(pos[1], top[1]), min(pos[1] + ra.height, top[1] + lw.height)      # only the part of the row that is on screen
+                hit = y2 > y1 and pos[0] < r[0] + r[2] and pos[0] + ra.width > r[0] and y1 < r[1] + r[3] and y2 > r[1]
+                want = hit or (i,) in self._lband_base
+                if want != sel.path_is_selected(path):
+                    sel.select_path(path) if want else sel.unselect_path(path)
+        self._lbg.get_child().queue_draw()
+
+    def _lband_end(self, g, dx, dy):
+        self._lband_start = self._lband_rect = None
+        self._lbg.get_child().queue_draw()
+
+    def _draw_lband(self, w, cr):
+        r = self._lband_rect
+        if not r or (r[2] < 2 and r[3] < 2):
+            return False
+        cr.rectangle(*r); cr.set_source_rgba(0.45, 0.5, 1.0, 0.18); cr.fill_preserve()
+        cr.set_source_rgba(0.45, 0.5, 1.0, 0.75); cr.set_line_width(1); cr.stroke()
+        return False
 
     def _open_row(self, path):
         row = self.store[path]
@@ -412,22 +483,22 @@ class SparkFiles(FileOps, appkit.GlassWindow):
             self.tabstrip.remove(ch); ch.destroy()
         self._save_tab()
         for i, t in enumerate(self.tabs):
-            box = Gtk.Box(spacing=4)
-            lb = label(self._tab_title(t)); lb.set_max_width_chars(18)
-            box.pack_start(lb, False, False, 0)
-            x = icon_button("close", 9, "Close tab", lambda i=i: self.close_tab(i), color=ink(), pad=4)
-            box.pack_start(x, False, False, 0)
-            b = Gtk.Button(); b.add(box); b.set_relief(Gtk.ReliefStyle.NONE); b.set_focus_on_click(False)
-            ctx = b.get_style_context(); ctx.add_class("filetab")
+            tab = Gtk.EventBox(); tab.set_visible_window(True)                  # a real box that can be hovered and painted
+            ctx = tab.get_style_context(); ctx.add_class("filetab")
             if i == self.cur_tab:
                 ctx.add_class("sel")
+            row = Gtk.Box(spacing=0)
+            lb = label(self._tab_title(t)); lb.set_max_width_chars(18)
+            b = Gtk.Button(); b.add(lb); b.set_relief(Gtk.ReliefStyle.NONE); b.set_focus_on_click(False)
             b.connect("clicked", lambda _b, i=i: self.switch_tab(i))
-            b.connect("button-press-event", lambda _b, ev, i=i: (self.close_tab(i), True)[1] if ev.button == 2 else False)   # middle-click closes
-            self.tabstrip.pack_start(b, False, False, 0)
+            b.connect("button-press-event", lambda _b, ev, i=i: (GLib.idle_add(self.close_tab, i), True)[1] if ev.button == 2 else False)   # middle-click closes
+            x = icon_button("close", 9, "Close tab", lambda i=i: GLib.idle_add(self.close_tab, i), color=ink(), pad=4)
+            row.pack_start(b, True, True, 0); row.pack_start(x, False, False, 0)
+            tab.add(row)
+            self.tabstrip.pack_start(tab, False, False, 0)
+            tab.show_all()                                                      # shown one by one: tabstrip itself is no_show_all
         multi = len(self.tabs) > 1
         self.tabstrip.set_visible(multi)
-        if multi:
-            self.tabstrip.show_all()
 
     def back(self):
         if self.pos > 0:
@@ -641,7 +712,9 @@ class SparkFiles(FileOps, appkit.GlassWindow):
 
     def new_folder(self):
         name = self._ask("New folder", "Folder name", "Untitled folder")
-        if name:
+        if name and ("/" in name or name in (".", "..")):
+            self.status.set_text("A folder name cannot contain \"/\" or be \".\" / \"..\"")     # Gio would happily resolve "../x" outside this folder
+        elif name:
             try:
                 self.cwd.get_child(name).make_directory(None)
             except GLib.Error as e:
@@ -663,14 +736,7 @@ class SparkFiles(FileOps, appkit.GlassWindow):
                 self.status.set_text("Could not move to Trash: %s" % e.message)
 
     def _ask(self, title, prompt, default=""):
-        d = Gtk.Dialog(title=title, transient_for=self, modal=True)
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("OK", Gtk.ResponseType.OK)
-        d.set_default_response(Gtk.ResponseType.OK)
-        e = Gtk.Entry(); e.set_text(default); e.set_activates_default(True); e.set_margin_start(14); e.set_margin_end(14)
-        d.get_content_area().pack_start(label(prompt), False, False, 10); d.get_content_area().pack_start(e, False, False, 10)
-        d.show_all()
-        r = d.run(); t = e.get_text().strip(); d.destroy()
-        return t if r == Gtk.ResponseType.OK and t else None
+        return appkit.ask_text(self, title, prompt, default)
 
     # ----------------------------------------------------------- input / menus
     def _item_click(self, ch, ev):

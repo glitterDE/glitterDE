@@ -2,6 +2,8 @@
  * XComposite (manual redirect) + XDamage + cairo-xlib. Draws shadows, alpha-blends translucent windows and blurs
  * whatever is behind windows that carry _GLITTER_BLUR=1 (real glass). Per-window hints (CARDINAL, set by glitter-wm):
  *   _GLITTER_BLUR 0/1   _GLITTER_SHADOW 0/1   _GLITTER_RADIUS px (corner radius used for blur clip and shadow)
+ *   _GLITTER_CLIP 0/1   round the window's own pixels to _GLITTER_RADIUS too (client-side-decorated and foreign popup windows paint square corners)
+ *   _GLITTER_RIM  0/1/2 1 = edge line along the body below the titlebar, 2 = edge line all the way round
  * It only reads the stacking order and window contents; it never manages windows.
  *
  * Tear-free output: finished dirty rectangles are handed to the X Present extension (xcb_present_pixmap), which copies them
@@ -38,12 +40,14 @@ typedef struct Win {
     Damage damage;
     Pixmap pix;
     cairo_surface_t *surf;
-    int blur, shadow, radius, opaque;                               /* opaque: 0 no, 1 solid dark backdrop, 2 solid light backdrop (fullscreen) */
+    int seen;                                                             /* scratch flag for resync_order() */
+    int blur, shadow, radius, opaque, clip;                               /* opaque: 0 no, 1 solid dark backdrop, 2 solid light backdrop (fullscreen) */
     XRectangle *shape; int nshape; int shape_valid;
     cairo_surface_t *blur_surf; int blur_valid, bx, by, bw, bh;      /* cached blurred backdrop */
     cairo_surface_t *shadow_surf; int sh_w, sh_h, sh_r;             /* cached shadow bitmap */
     Window above_id; int has_above;                                 /* sibling below us, from the last ConfigureNotify */
     Pixmap old_pix; cairo_surface_t *old_surf; int old_w, old_h;    /* resize hold: contents from before the last resize */
+    int blur_h, rim, blur_stale; double moved_at;                     /* blur only the top blur_h px (0 = all); draw a rim; cached blur follows a window being dragged */
     double hold_until; int body_y;                                  /* hold deadline (ms); y where the client area starts inside the frame */
     struct Win *next;
 } Win;
@@ -58,7 +62,7 @@ static int dirty = 1, running = 1;
 static long n_blur, n_restack, n_damage;          /* statistics (GLITTERDE_COMP_STATS=1) */
 static int dx1 = 0, dy1 = 0, dx2 = 0, dy2 = 0;   /* dirty rectangle (screen coords), empty when dx2<=dx1 */
 #define PAD 64
-static Atom a_blur, a_shadow, a_radius, a_body, a_opaque;
+static Atom a_blur, a_shadow, a_radius, a_body, a_opaque, a_blur_h, a_rim, a_clip;
 static double now_ms(void);
 
 static int on_error(Display *d, XErrorEvent *e) { (void)d; (void)e; return 0; }
@@ -111,6 +115,9 @@ static void props(Win *w) {
     w->radius = (int)get_card(w->id, a_radius, 0);
     w->body_y = (int)get_card(w->id, a_body, 0);
     w->opaque = (int)get_card(w->id, a_opaque, 0);
+    w->blur_h = (int)get_card(w->id, a_blur_h, 0);
+    w->rim = (int)get_card(w->id, a_rim, 0);
+    w->clip = (int)get_card(w->id, a_clip, 0);
 }
 
 static void drop_pix(Win *w) {
@@ -159,6 +166,7 @@ static void add_win(Window id) {
     XWindowAttributes a;
     if (!XGetWindowAttributes(dpy, id, &a) || a.class == InputOnly) return;
     Win *w = calloc(1, sizeof *w);
+    if (!w) return;                                          /* out of memory: leave this window uncomposited rather than crash the desktop */
     w->id = id;
     refresh_attrs(w);
     XSelectInput(dpy, id, PropertyChangeMask);
@@ -191,9 +199,15 @@ static void del_win(Window id) {
 static void resync_order(void) {
     Window r, p, *kids = NULL; unsigned n = 0;
     if (!XQueryTree(dpy, DefaultRootWindow(dpy), &r, &p, &kids, &n) || !n) { if (kids) XFree(kids); return; }
-    Win **order = calloc(n, sizeof(Win *)); unsigned m = 0;
-    for (unsigned i = 0; i < n; i++) { Win *w = find(kids[i]); if (w) order[m++] = w; }   /* look everything up BEFORE relinking */
+    unsigned total = 0;
+    for (Win *w = wins; w; w = w->next) { w->seen = 0; total++; }
+    Win **order = calloc(total ? total : 1, sizeof(Win *)); unsigned m = 0;
+    if (!order) { XFree(kids); return; }
+    for (unsigned i = 0; i < n; i++) { Win *w = find(kids[i]); if (w && !w->seen) { w->seen = 1; order[m++] = w; } }   /* look everything up BEFORE relinking */
     XFree(kids);
+    /* A window we track but the server no longer lists (destroyed, DestroyNotify still queued) must stay in the list: dropping it here
+       meant del_win() could never find it, leaking its pixmaps and damage object. Keep it, on top, until its DestroyNotify arrives. */
+    for (Win *w = wins; w; w = w->next) if (!w->seen && m < total) order[m++] = w;
     if (m) {
         for (unsigned i = 0; i < m; i++) order[i]->next = (i + 1 < m) ? order[i + 1] : NULL;
         wins = order[0];
@@ -294,6 +308,7 @@ static cairo_surface_t *scaled(cairo_surface_t *src, int sw, int sh, int dw, int
 static void blur_rect(Win *w, int *x, int *y, int *bw, int *bh) {
     int x1 = w->x < 0 ? 0 : w->x, y1 = w->y < 0 ? 0 : w->y;
     int x2 = w->x + w->w > W ? W : w->x + w->w, y2 = w->y + w->h > H ? H : w->y + w->h;
+    if (w->blur_h > 0 && w->y + w->blur_h < y2) y2 = w->y + w->blur_h;
     *x = x1; *y = y1; *bw = x2 - x1; *bh = y2 - y1;
 }
 
@@ -339,7 +354,7 @@ static void blur_compute(Win *w) {
         cairo_surface_destroy(t); cairo_surface_destroy(s1); s1 = u;
     }
     if (w->blur_surf) cairo_surface_destroy(w->blur_surf);
-    w->blur_surf = s1; w->bx = x; w->by = y; w->bw = bw; w->bh = bh; w->blur_valid = 1;
+    w->blur_surf = s1; w->bx = x; w->by = y; w->bw = bw; w->bh = bh; w->blur_valid = 1; w->blur_stale = 0;
 }
 
 static void blur_paint(cairo_t *c, Win *w) {
@@ -348,6 +363,7 @@ static void blur_paint(cairo_t *c, Win *w) {
     cairo_save(c);
     shape_path(c, w);
     cairo_clip(c);
+    if (w->blur_h > 0) { cairo_new_path(c); cairo_rectangle(c, w->x, w->y, w->w, w->blur_h); cairo_clip(c); }
     cairo_translate(c, w->bx, w->by);
     cairo_scale(c, (double)w->bw / sw, (double)w->bh / sh);
     cairo_set_source_surface(c, w->blur_surf, 0, 0);
@@ -407,6 +423,7 @@ static void present_poll(void) {
 /* copy the finished rectangle of the back buffer into a small pixmap and let the server put it on the overlay at the next vblank */
 static int present_rect(int rx, int ry, int rw, int rh) {
     if (!present_on) return 0;
+    if ((double)rw * rh > 0.35 * (double)W * H) { rx = ry = 0; rw = W; rh = H; }   /* mostly-changed screen (window drag): whole frame */
     Pixmap pm = XCreatePixmap(dpy, root, rw, rh, DefaultDepth(dpy, scr));
     XCopyArea(dpy, bb, pm, copy_gc, rx, ry, rw, rh, 0, 0);
     present_serial++;
@@ -461,6 +478,7 @@ static void paint(void) {
         }
         cairo_save(c);
         if (w->nshape > 1 || !w->shape_valid) { shape_path(c, w); cairo_clip(c); }
+        if ((w->rim || w->clip) && w->radius > 0 && w->nshape <= 1) { rrect(c, w->x, w->y, w->w, w->h, w->radius); cairo_clip(c); }
         cairo_set_source_surface(c, s, w->x, w->y);
         if (held) {                                                  /* never paint outside the part the old picture covers */
             cairo_new_path(c);
@@ -469,6 +487,19 @@ static void paint(void) {
         }
         cairo_paint(c);
         cairo_restore(c);
+        if (w->rim == 2 && w->radius > 0) {                           /* frameless window: the same 1 px edge, all the way round */
+            cairo_save(c);
+            rrect(c, w->x + 0.5, w->y + 0.5, w->w - 1, w->h - 1, w->radius - 0.5);
+            cairo_set_source_rgba(c, 1, 1, 1, 0.22); cairo_set_line_width(c, 1.0); cairo_stroke(c);
+            cairo_restore(c);
+        } else if (w->rim == 1 && w->radius > 0 && w->h > w->body_y) {            /* same 1 px edge as the titlebar and glass bodies: sides + bottom of the body */
+            cairo_save(c);
+            cairo_rectangle(c, w->x, w->y + w->body_y, w->w, w->h - w->body_y);
+            cairo_clip(c);
+            rrect(c, w->x + 0.5, w->y - 40, w->w - 1, w->h + 39.5, w->radius - 0.5);
+            cairo_set_source_rgba(c, 1, 1, 1, 0.30); cairo_set_line_width(c, 1.0); cairo_stroke(c);
+            cairo_restore(c);
+        }
     }
     cairo_destroy(c);
     cairo_surface_flush(bb_surf);
@@ -558,8 +589,14 @@ static void handle(XEvent *e) {
             dirty_win(w);                                        /* old position */
             w->x = c->x; w->y = c->y; w->w = c->width; w->h = c->height;
             if (resized) { int nw_ = w->w, nh_ = w->h; w->w = ow; w->h = oh; hold_old(w); w->w = nw_; w->h = nh_; w->shape_valid = 0; }
-            if (moved || resized) {
+            if (moved && !resized && w->blur && w->blur_valid && getenv("GLITTERDE_BLUR_EXACT") == NULL) {
+                w->bx += w->x - ox; w->by += w->y - oy;          /* being dragged: the frosted pane travels with the window (a rebuild per frame is what made drags judder) */
+                w->blur_stale = 1;
+            } else if (moved || resized) {
                 w->blur_valid = 0;                               /* what is behind a glass window changed with it */
+            }
+            if (moved || resized) {
+                w->moved_at = now_ms();
                 blur_invalidate_rect(ox, oy, ow, oh);            /* uncovered area: glass windows there see something new */
             }
             if (restacked) restack(w, c->above);                 /* also marks the new position */
@@ -594,7 +631,10 @@ int main(int argc, char **argv) {
     a_blur = XInternAtom(dpy, "_GLITTER_BLUR", False);
     a_shadow = XInternAtom(dpy, "_GLITTER_SHADOW", False);
     a_radius = XInternAtom(dpy, "_GLITTER_RADIUS", False);
+    a_clip = XInternAtom(dpy, "_GLITTER_CLIP", False);
     a_body = XInternAtom(dpy, "_GLITTER_BODY_Y", False);
+    a_blur_h = XInternAtom(dpy, "_GLITTER_BLUR_H", False);
+    a_rim = XInternAtom(dpy, "_GLITTER_RIM", False);
     char sel[32]; snprintf(sel, sizeof sel, "_NET_WM_CM_S%d", scr);
     Atom cm = XInternAtom(dpy, sel, False);
     if (XGetSelectionOwner(dpy, cm) != None) { fprintf(stderr, "glitter-comp: another compositor is running\n"); return 3; }
@@ -641,6 +681,8 @@ int main(int argc, char **argv) {
             if (XGetGeometry(dpy, root, &gr, &gx, &gy, &gw, &gh, &gb, &gd)) resize_root((int)gw, (int)gh);
         }
         present_poll();
+        for (Win *hw = wins; hw; hw = hw->next)                 /* a dragged window stopped: build its real blur once */
+            if (hw->blur_stale && t - hw->moved_at > 90) { hw->blur_stale = 0; hw->blur_valid = 0; dirty_win(hw); }
         for (Win *hw = wins; hw; hw = hw->next)                 /* resize hold ran out: show whatever the window has now */
             if (hw->old_surf && t >= hw->hold_until) { drop_old(hw); hw->blur_valid = 0; add_dirty(hw->x, hw->y, hw->w, hw->h); }
         /* adaptive pacing: never queue paints faster than the X server can finish them (slow software Xephyr),

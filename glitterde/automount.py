@@ -68,17 +68,20 @@ class AutoMounter:
         try:
             volume.mount_finish(res)
         except GLib.Error as e:
+            if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.ALREADY_MOUNTED):
+                return                                    # somebody else (udisks, gvfs) got there first: nothing went wrong
             self._tried.add(key)
-            self.on_event("failed", volume.get_name(), e.message)
+            if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.FAILED_HANDLED):      # FAILED_HANDLED: the user already saw / cancelled the prompt
+                self.on_event("failed", volume.get_name(), e.message)
             return
         m = volume.get_mount()
         if m is not None:
-            self._ours.add(m.get_name())
+            self._ours.add(m.get_root().get_uri())
             self.on_event("mounted", m.get_name(), m.get_root().get_uri())
 
     def _on_mount_removed(self, _mon, mount):
-        name = mount.get_name()
-        if name in self._ours:
-            self._ours.discard(name)
+        name, root = mount.get_name(), mount.get_root().get_uri()        # keyed by location: two sticks can have the same label
+        if root in self._ours:
+            self._ours.discard(root)
             self.on_event("removed", name, "")
         self._tried.clear()                       # a re-plugged drive gets a fresh attempt

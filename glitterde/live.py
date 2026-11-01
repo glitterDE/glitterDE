@@ -19,7 +19,7 @@ try:
 except (ValueError, ImportError):
     Wnck = None
 
-from . import automount, config, gfx, scheme, services
+from . import automount, config, gfx, netbt, netui, scheme, services
 from . import settings_model as prefs
 from . import icons as ic
 from .menus import GlassConfirm, GlassMenu
@@ -54,6 +54,12 @@ EXTRA_CSS = b"""
 .lightpanel scrollbar slider { background-color: rgba(42,45,110,0.35); }
 entry.withicon { padding-left: 32px; }
 .panel { border-bottom: 1px solid rgba(255,255,255,0.12); }
+.hovcard.darkpanel label { color: #ffffff; }
+.hovcard.lightpanel label { color: #2a2d6e; }
+.hovcard.lightpanel label.hovhead, .hovcard.lightpanel label.hovsub { color: rgba(42,45,110,0.66); }
+.hovcard.lightpanel .hovrow:hover { background-color: rgba(96,108,255,0.16); }
+.hovcard.lightpanel .hovrow.act { background-color: rgba(96,108,255,0.12); }
+.hovcard.lightpanel .hovrow.mini label.hovtitle { color: rgba(42,45,110,0.55); }
 .hovcard label { color: #ffffff; }
 .hovcard label.hovhead { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: rgba(255,255,255,0.62); }
 .hovcard label.hovsub { font-size: 11px; color: rgba(255,255,255,0.62); }
@@ -130,6 +136,7 @@ class Popup(Gtk.Window):
         super().__init__()
         self.oscale = 1.0
         self.shell, self.material, self.base = shell, material, radius
+        self.follow = material in ("dock", "panel", "card")          # shell glass flyouts follow light/dark; the launcher already picks its own material
         self.set_decorated(False); self.set_app_paintable(True)
         self.set_skip_taskbar_hint(True); self.set_skip_pager_hint(True)
         self.set_type_hint(hint)
@@ -138,15 +145,24 @@ class Popup(Gtk.Window):
         if self.comp:
             self.set_visual(Gdk.Screen.get_default().get_rgba_visual())
         self.connect("draw", self._draw)
+        self.restyle()
         if not self.comp:
             self.connect("size-allocate", lambda w, a: round_shape(w, self.shell.theme.rad(self.base)))
+
+    def restyle(self):
+        """(Re)apply the light/dark look: material and the ink classes the labels and entries inside use."""
+        if self.follow:
+            self.material = scheme.menu_material()
+            ctx = self.get_style_context()
+            ctx.remove_class("lightpanel"); ctx.remove_class("darkpanel"); ctx.add_class(scheme.panel_class())
+        self.queue_draw()
 
     def _draw(self, w, cr):
         if self.comp:
             a = self.get_allocation()
             r = self.shell.theme.rad(self.base)
             gfx.comp_glass(cr, a.width, a.height, r, self.shell.theme.material(self.material), self.oscale)
-            gfx.stroke_rrect(cr, 0, 0, a.width, a.height, r, (1, 1, 1, 0.32), 1.0)
+            gfx.stroke_rrect(cr, 0, 0, a.width, a.height, r, gfx.WINDOW_RIM if self.follow else (1, 1, 1, 0.32), 1.0)
             return False
         gw, g = self.get_window(), self.shell.desk.glass
         if gw is None or g is None:
@@ -223,7 +239,7 @@ class WindowHover(Popup):
         col.set_size_request(190, -1)
         h.pack_start(col, True, True, 0)
         x = Gtk.EventBox(); x.set_visible_window(True); x.get_style_context().add_class("hovx"); x.set_valign(Gtk.Align.CENTER)
-        x.add(Ico("close", 10, (1, 1, 1, 0.8), 1.7)); x.set_tooltip_text("Close window")
+        x.add(Ico("close", 10, scheme.ink(), 1.7)); x.set_tooltip_text("Close window")
         x.connect("button-release-event", lambda _w, e, w=w: (w.close(Gtk.get_current_event_time()), self.hide_now(), True)[2])
         h.pack_end(x, False, False, 0)
         ev.add(h)
@@ -614,13 +630,42 @@ class LiveShell:
         if not self.use_popups:
             return
         self.tray = Popup(self, "dock", 16, Gdk.WindowTypeHint.DROPDOWN_MENU)
+        from . import menus
+        menus.set_popup_hook(lambda m: self.close_flyouts(keep=m))
         self.tray_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.tray_box.set_size_request(300, -1)
         for m in ("top", "bottom", "start", "end"):
             getattr(self.tray_box, "set_margin_" + m)(14)
         self.tray.add(self.tray_box)
+        self.tray_box.connect("size-allocate", lambda *_: GLib.idle_add(self._tray_regrow))
         self.tray.connect("focus-out-event", lambda *_: (GLib.idle_add(self._tray_focus_out), False)[1])
         self.tray.connect("key-press-event", lambda w, ev: (self.close_tray(), True)[1] if ev.keyval == Gdk.KEY_Escape else False)
+
+    def _tray_regrow(self):
+        """The popup's content changed height (a list filled in, a row opened): with the panel at the bottom the popup must grow upward."""
+        if self.tray is None or not self.tray.get_visible():
+            return False
+        top, bot = self._inset()
+        if bot:
+            mx, my, mw, mh = self.mon
+            th = self.tray.get_allocated_height()
+            x, _y = self.tray.get_position()
+            self.tray.move(x, my + mh - bot - th - 2)
+        return False
+
+    def close_flyouts(self, keep=None):
+        """Everything that floats over the desktop (tray / notification popup, launcher, dock hover card, menus) is exclusive: opening one closes the rest."""
+        from . import menus
+        menus.close_all(keep if isinstance(keep, menus.GlassMenu) else None)
+        if keep != "tray":
+            self.close_tray()
+        if keep != "launcher" and getattr(self, "launcher_visible", False):
+            self.close_launcher()
+        h = getattr(self, "_hover", None)
+        if h is not None and keep != "hover":
+            h.hide_now()
+        if getattr(self, "_hover_t", None) and keep != "hover":
+            GLib.source_remove(self._hover_t); self._hover_t = None
 
     def _tray_focus_out(self):
         if self.tray.get_visible() and time.time() - self._tray_opened > 0.5 and not self.tray.is_active():
@@ -645,8 +690,8 @@ class LiveShell:
         ck, ct = getattr(self, "_tray_closed", (None, 0))
         if ck == kind and time.time() - ct < 0.45:
             self._tray_closed = (None, 0); return
-        if self.launcher_visible:
-            self.close_launcher()
+        self.close_flyouts(keep="tray")
+        self.tray.restyle()
         for ch in self.tray_box.get_children():
             self.tray_box.remove(ch)
         self.tray_kind = kind
@@ -664,7 +709,7 @@ class LiveShell:
 
     def _tray_head(self, box, icon, title):
         h = Gtk.Box(spacing=8)
-        h.pack_start(Ico(icon, 16, (1, 1, 1, 0.95), 1.5), False, False, 0)
+        h.pack_start(Ico(icon, 16, scheme.ink(), 1.5), False, False, 0)
         h.pack_start(label(title, "big"), False, False, 0)
         box.pack_start(h, False, False, 2)
 
@@ -678,7 +723,7 @@ class LiveShell:
         return sw
 
     def _tray_slider(self, box, value, cb, icon):
-        r = Gtk.Box(spacing=10); r.pack_start(Ico(icon, 15, (1, 1, 1, 0.9), 1.5), False, False, 0)
+        r = Gtk.Box(spacing=10); r.pack_start(Ico(icon, 15, scheme.ink(), 1.5), False, False, 0)
         sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1); sc.set_draw_value(False); sc.set_hexpand(True)
         sc.set_value(value * 100)
         st = {"t": None}
@@ -697,193 +742,30 @@ class LiveShell:
         b.connect("clicked", lambda *_: cb()); box.pack_start(b, False, False, 2)
         return b
 
-    # -- network
+    # -- network + bluetooth (shared widgets: see netui.py)
+    class _NetHost(netui.Host):
+        def __init__(self, shell):
+            self.shell = shell
+
+        def toast(self, title, text):
+            self.shell.show_toast(title, text)
+
+        def open_settings(self, page):
+            self.shell.close_tray()
+            services.fire(["sparksettings", page])
+
+    def _net_host(self):
+        if getattr(self, "_nethost", None) is None:
+            self._nethost = self._NetHost(self)
+        return self._nethost
+
     def _tray_wifi(self, box):
-        self._tray_head(box, "wifi", "Network")
-        if not shutil.which("nmcli"):
-            for n, kind, up, speed in services.interfaces():
-                r = Gtk.Box(spacing=8); r.pack_start(Ico("wifi" if kind == "wifi" else "network", 15, (1, 1, 1, 0.9 if up else 0.4), 1.5), False, False, 0)
-                r.pack_start(label("%s - %s" % (n, "connected" if up else "not connected")), False, False, 0); box.pack_start(r, False, False, 2)
-            box.pack_start(self._empty("Install NetworkManager (nmcli) to scan and connect to Wi-Fi from here."), False, False, 4)
-            return
-        sw = self._tray_switch_row(box, "Wi-Fi", lambda v: (services.fire(["nmcli", "radio", "wifi", "on" if v else "off"]), GLib.timeout_add(1500, self._tray_refresh_wifi)))
-        services.run_async(["nmcli", "radio", "wifi"], lambda out: sw.set_init("enabled" in (out or "")))
-        self.net_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        box.pack_start(self.net_list, False, False, 0)
-        if not getattr(self, "_net_busy", None):
-            self._net_status = {}
-        self._net_rows = []
-        self._tray_refresh_wifi()
-        self._tray_btn(box, "Network settings…", lambda: services.fire(["nm-connection-editor"]), bool(shutil.which("nm-connection-editor")))
+        if getattr(self, "wifi_model", None) is None:
+            self.wifi_model = netui.WifiModel(self._net_host())
+        box.pack_start(netui.WifiPanel(self.wifi_model, self._net_host()), False, False, 0)
 
-    def _tray_refresh_wifi(self):
-        if self.tray_kind != "wifi":
-            return False
-
-        def fill(out):
-            if self.tray_kind != "wifi":
-                return
-            seen, rows = set(), []
-            for ln in (out or "").splitlines():
-                f = [x.replace("\x00", ":") for x in ln.replace("\\:", "\x00").split(":")]
-                if len(f) >= 4 and f[1] and f[1] not in seen:
-                    seen.add(f[1]); rows.append((f[0] == "*", f[1], int(f[2] or 0), f[3]))
-            rows.sort(key=lambda r: (not r[0], -r[2]))
-            self._net_rows = rows[:8]
-            self._render_wifi()
-        services.run_async(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list"], fill)
-        return False
-
-    def _status_widget(self, kind, text):
-        """Right-hand side of a network / device row: spinner while working, then the outcome."""
-        w = Gtk.Box(spacing=6)
-        if kind == "connecting":
-            sp = Gtk.Spinner(); sp.start(); w.pack_start(sp, False, False, 0)
-        l = label(text, "muted", ellipsize=False)
-        l.set_line_wrap(True); l.set_max_width_chars(34); l.set_xalign(0)       # a long reason wraps instead of widening the popup
-        w.pack_start(l, False, False, 0)
-        return w
-
-    def _render_wifi(self):
-        """Draw the network list from the last scan plus the connection status, without scanning again."""
-        if self.tray_kind != "wifi":
-            return
-        for ch in self.net_list.get_children():
-            self.net_list.remove(ch)
-        status, busy = getattr(self, "_net_status", {}), getattr(self, "_net_busy", None)
-        for inuse, ssid, sig, sec in self._net_rows:
-            kind, text = status.get(ssid, (None, ""))
-            holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            b = Gtk.Button(); b.set_relief(Gtk.ReliefStyle.NONE)
-            r = Gtk.Box(spacing=8); r.pack_start(Ico("wifi", 14, (1, 1, 1, 0.5 + sig / 200.0), 1.5), False, False, 2)
-            r.pack_start(label(ssid + ("   (connected)" if inuse and not kind else "")), True, True, 0)
-            if kind:
-                r.pack_end(self._status_widget(kind, text), False, False, 2)
-            elif sec:
-                r.pack_end(Ico("pin", 11, (1, 1, 1, 0.5), 1.4), False, False, 2)
-            b.add(r)
-            b.connect("clicked", lambda _b, s_=ssid, sc=bool(sec): self._wifi_connect(s_, sc))
-            b.set_sensitive(not busy)
-            holder.pack_start(b, False, False, 0)
-            if kind == "password" and not busy:                       # inline password entry: the popup stays open and shows progress
-                pr = Gtk.Box(spacing=6); pr.set_margin_start(30); pr.set_margin_end(6); pr.set_margin_bottom(4)
-                e = Gtk.Entry(); e.set_visibility(False); e.set_placeholder_text("Password"); e.set_width_chars(16)
-                j = Gtk.Button(label="Join"); j.get_style_context().add_class("clear")
-                go = lambda *_a, s_=ssid, e_=e: self._wifi_connect(s_, True, e_.get_text())
-                e.connect("activate", go); j.connect("clicked", go)
-                pr.pack_start(e, True, True, 0); pr.pack_start(j, False, False, 0)
-                holder.pack_start(pr, False, False, 0)
-                GLib.idle_add(lambda e_=e: (e_.grab_focus(), False)[1])
-            self.net_list.pack_start(holder, False, False, 0)
-        if not self._net_rows:
-            self.net_list.pack_start(self._empty("No networks found."), False, False, 2)
-        self.net_list.show_all()
-
-    def _wifi_connect(self, ssid, secured, password=None):
-        if getattr(self, "_net_busy", None):
-            return
-        status = self.__dict__.setdefault("_net_status", {})
-        status.clear(); status[ssid] = ("connecting", "Connecting…")
-        self._net_busy = ssid
-        self._render_wifi()
-        argv = ["nmcli", "-w", "20", "dev", "wifi", "connect", ssid] + (["password", password] if password else [])
-
-        def done(ok, out, err):
-            self._net_busy = None
-            status.clear()
-            if ok:
-                status[ssid] = ("ok", "Connected")
-                self.show_toast("Wi-Fi", "Connected to " + ssid)
-                self.refresh_network()
-            else:
-                kind, text = services.net_error(err + "\n" + out)
-                if kind == "password" and not secured:
-                    kind = "failed"
-                if kind == "password":
-                    text = "Wrong password" if password else "Password needed"       # short: the row also has to show the name
-                status[ssid] = (kind, text)
-                if kind != "password":
-                    self.show_toast("Wi-Fi", "Could not connect to %s: %s" % (ssid, text))
-            if self.tray_kind == "wifi":
-                self._tray_refresh_wifi()
-        services.run_async_err(argv, done)
-
-    # -- bluetooth
     def _tray_bluetooth(self, box):
-        self._tray_head(box, "bluetooth", "Bluetooth")
-        if not (shutil.which("bluetoothctl") and self.bt_present):
-            box.pack_start(self._empty("No Bluetooth adapter found. Plug one in and it will appear here."), False, False, 4)
-            return
-        sw = self._tray_switch_row(box, "Bluetooth", lambda v: (services.fire(["bluetoothctl", "power", "on" if v else "off"]), GLib.timeout_add(1200, self._tray_refresh_bt)))
-        services.run_async(["bluetoothctl", "show"], lambda out: sw.set_init("Powered: yes" in (out or "")))
-        self.bt_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        box.pack_start(self.bt_list, False, False, 0)
-        if not getattr(self, "_bt_busy", None):
-            self._bt_status = {}
-        self._bt_rows = ([], set())
-        self._tray_refresh_bt()
-
-    def _tray_refresh_bt(self):
-        if self.tray_kind != "bluetooth":
-            return False
-
-        def with_conn(conn_out):
-            conn = {l.split(" ", 2)[1] for l in (conn_out or "").splitlines() if l.count(" ") >= 2}
-
-            def fill(out):
-                if self.tray_kind != "bluetooth":
-                    return
-                devs = []
-                for ln in (out or "").splitlines():
-                    parts = ln.split(" ", 2)
-                    if len(parts) >= 3:
-                        devs.append((parts[1], parts[2]))
-                self._bt_rows = (devs, conn)
-                self._render_bt()
-            services.run_async(["bluetoothctl", "devices", "Paired"], fill)
-        services.run_async(["bluetoothctl", "devices", "Connected"], with_conn)
-        return False
-
-    def _render_bt(self):
-        if self.tray_kind != "bluetooth":
-            return
-        devs, conn = self._bt_rows
-        status, busy = getattr(self, "_bt_status", {}), getattr(self, "_bt_busy", None)
-        for ch in self.bt_list.get_children():
-            self.bt_list.remove(ch)
-        for mac, name in devs:
-            kind, text = status.get(mac, (None, ""))
-            r = Gtk.Box(spacing=8); r.pack_start(Ico("bluetooth", 14, (1, 1, 1, 0.9 if mac in conn else 0.5), 1.5), False, False, 2)
-            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-            col.pack_start(label(name), False, False, 0)
-            if kind:
-                col.pack_start(self._status_widget(kind, text), False, False, 0)
-            r.pack_start(col, True, True, 0)
-            b = Gtk.Button(label="Disconnect" if mac in conn else "Connect"); b.get_style_context().add_class("clear")
-            b.set_sensitive(not busy)
-            b.connect("clicked", lambda _b, m=mac, c=(mac in conn): self._bt_connect(m, c))
-            r.pack_end(b, False, False, 0); self.bt_list.pack_start(r, False, False, 2)
-        if not devs:
-            self.bt_list.pack_start(self._empty("No paired devices. Pair one with bluetoothctl for now."), False, False, 2)
-        self.bt_list.show_all()
-
-    def _bt_connect(self, mac, connected):
-        if getattr(self, "_bt_busy", None):
-            return
-        name = next((n for m, n in self._bt_rows[0] if m == mac), mac)
-        status = self.__dict__.setdefault("_bt_status", {})
-        status.clear(); status[mac] = ("connecting", "Disconnecting…" if connected else "Connecting…")
-        self._bt_busy = mac
-        self._render_bt()
-
-        def done(ok, out, err):
-            self._bt_busy = None
-            good, text = services.bt_result(ok, out + "\n" + err, not connected)
-            status.clear(); status[mac] = ("ok" if good else "failed", text)
-            self.show_toast("Bluetooth", ("%s: %s" % (name, text)) if good else "%s: %s" % (name, text))
-            if self.tray_kind == "bluetooth":
-                self._tray_refresh_bt()
-        services.run_async_err(["bluetoothctl", "--timeout", "20", "disconnect" if connected else "connect", mac], done)
+        box.pack_start(netui.BtPanel(self.bt, self._net_host()), False, False, 0)
 
     # -- audio
     def _tray_volume(self, box):
@@ -893,9 +775,32 @@ class LiveShell:
             return
         holder = {}
 
+        devs = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+
         def got(v, muted):
-            holder["sc"] = self._tray_slider(box, v if v is not None else 0.5, self.audio.set, "volume"); box.show_all()
-            self._tray_btn(box, "Mute / unmute", self.audio.toggle_mute); box.show_all()
+            holder["sc"] = self._tray_slider(box, v if v is not None else 0.5, self.audio.set, "volume")
+            self._tray_btn(box, "Mute / unmute", self.audio.toggle_mute)
+            h = label("OUTPUT DEVICE", "tiny"); h.set_margin_top(4)
+            box.pack_start(h, False, False, 0); box.pack_start(devs, False, False, 0); box.show_all()
+            self.audio.sinks(fill)
+
+        def fill(rows):
+            if self.tray_kind != "volume":
+                return
+            for ch in devs.get_children():
+                devs.remove(ch); ch.destroy()
+            for key, name, default in rows:
+                b = Gtk.Button(); b.get_style_context().add_class("clear")
+                r = Gtk.Box(spacing=8)
+                tick = Ico("check", 13, scheme.ink(), 2.0); tick.set_opacity(1.0 if default else 0.0)
+                r.pack_start(tick, False, False, 0); r.pack_start(label(name), True, True, 0)
+                b.add(r)
+                b.connect("clicked", lambda _b, k=key: self.audio.set_default(k, lambda: (self.tray_kind == "volume" and self.audio.sinks(fill),
+                                                                                         self.audio.get(lambda v2, m2: holder["sc"].set_value((v2 if v2 is not None else 0.5) * 100)) if "sc" in holder else None)))
+                devs.pack_start(b, False, False, 0)
+            if not rows:
+                devs.pack_start(self._empty("No output devices found."), False, False, 0)
+            devs.show_all()
         self.audio.get(got)
 
     # -- brightness + night light
@@ -960,26 +865,61 @@ class LiveShell:
 
     def _desktop_drop(self, w, ctx, x, y, sel, info, time_):
         """Files dropped on the desktop (from SparkFiles or any file manager) are copied or moved into the Desktop folder."""
-        from .filesops import copy_tree, delete_tree, unique_child
+        import threading
+        from . import progress as P
+        from .filesops import unique_child
         uris = sel.get_uris() or []
         move = ctx.get_selected_action() == Gdk.DragAction.MOVE
         dest = Gio.File.new_for_path(self._ddir)
-        for u in uris:
-            src = Gio.File.new_for_uri(u)
-            if src.get_parent() is not None and src.get_parent().equal(dest):
-                continue                                              # already on the desktop
-            try:
-                t = unique_child(dest, src.get_basename())
-                if move:
-                    try:
-                        src.move(t, Gio.FileCopyFlags.NOFOLLOW_SYMLINKS, None, None, None)
-                    except GLib.Error:
-                        copy_tree(src, t); delete_tree(src)
-                else:
-                    copy_tree(src, t)
-            except GLib.Error as e:
-                print("glitterde: desktop drop failed: %s" % e.message, file=sys.stderr)
+        srcs = [Gio.File.new_for_uri(u) for u in uris]
+        srcs = [f for f in srcs if not (f.get_parent() is not None and f.get_parent().equal(dest))]      # already on the desktop
         Gtk.drag_finish(ctx, bool(uris), False, time_)
+        srcs, rejected = self._split_drop_sources(srcs, dest)
+        if rejected:
+            self.show_toast("Cannot put a folder inside itself", "%s contains the Desktop folder, so it was not copied." % (rejected[0].get_basename() or "That folder"))
+        if not srcs:
+            return
+        pw = getattr(self, "_drop_pw", None)
+        if pw is None:
+            pw = self._drop_pw = P.ProgressWindow(None)
+        job = P.Job("%s %d item%s to the desktop" % ("Moving" if move else "Copying", len(srcs), "" if len(srcs) == 1 else "s"),
+                    "Moving" if move else "Copying")
+        job.total, job.n_total = P.scan(srcs)
+        pw.add_job(job)
+
+        def run():
+            err = None
+            try:
+                for src in srcs:
+                    job.check()
+                    t = unique_child(dest, src.get_basename())
+                    if move:
+                        job.partial = t; P.move_file(src, t, job); job.partial = None
+                    else:
+                        job.created.append(t); P.copy_tree(src, t, job)
+            except P.Cancelled:
+                job.cancelled = True
+                for t in ([job.partial] if job.partial else []) + (job.created if not move else []):
+                    P.remove_quietly(t)
+            except (GLib.Error, OSError) as e:
+                err = getattr(e, "message", None) or str(e)
+                print("glitterde: desktop drop failed: %s" % err, file=sys.stderr)
+
+            def fin():
+                job.finished, job.error = True, err
+                pw.finish(job)
+                return False
+            GLib.idle_add(fin)
+        threading.Thread(target=run, daemon=True).start()
+
+    @staticmethod
+    def _split_drop_sources(srcs, dest):
+        """(ok, rejected): a folder that contains the destination (your home folder, or the Desktop itself) cannot be copied into it. Without
+        this check such a drop recursed - Desktop/home/Desktop/home/... - down to the path-length limit (819 nested folders in a test)."""
+        from .filesops import inside
+        nofollow = Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS
+        bad = [f for f in srcs if inside(dest, f) and f.query_file_type(nofollow, None) == Gio.FileType.DIRECTORY]
+        return [f for f in srcs if f not in bad], bad
 
     def _queue_icons(self):
         if self._icons_id:
@@ -1142,7 +1082,7 @@ class LiveShell:
         return True
 
     def reset_icon_positions(self):
-        d = config.load(); d.pop("icon_pos", None); config.save(d)
+        config.remove("icon_pos")
         self.rebuild_icons()
 
     def _trash(self, it):
@@ -1158,7 +1098,12 @@ class LiveShell:
         if it["dir"]:
             services.fire(["sparkfiles", path]); return
         if path.endswith(".desktop"):
-            app = Gio.DesktopAppInfo.new_from_filename(path)
+            try:
+                app = Gio.DesktopAppInfo.new_from_filename(path)
+            except TypeError:                       # PyGObject raises (not returns None) for a launcher GLib rejects: the app was uninstalled
+                app = None                          # (TryExec missing), the file is malformed ... say so instead of doing nothing
+                self.show_toast("This launcher does not work", "%s: the program it starts is not installed, or the file is damaged." % it["name"])
+                return
             if app:
                 self.launch(app); return
         self.open_uri(Gio.File.new_for_path(path).get_uri(), force_default=True)
@@ -1194,20 +1139,15 @@ class LiveShell:
         GlassMenu(items, theme=self.theme, min_width=232).popup_at(ev.x_root, ev.y_root)
 
     def new_desktop_folder(self):
-        d = Gtk.Dialog(title="New folder", transient_for=self.win, modal=True)
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("Create", Gtk.ResponseType.OK)
-        d.set_default_response(Gtk.ResponseType.OK)
-        e = Gtk.Entry(); e.set_text("Untitled folder"); e.set_activates_default(True)
-        e.set_margin_start(14); e.set_margin_end(14); e.set_margin_bottom(10)
-        d.get_content_area().pack_start(label("Folder name", margin=10) if False else Gtk.Label(label="Folder name", margin=10), False, False, 0)
-        d.get_content_area().pack_start(e, False, False, 0)
-        d.show_all()
-        if d.run() == Gtk.ResponseType.OK and e.get_text().strip():
+        from . import appkit
+        name = appkit.ask_text(None, "New folder", "Folder name", "Untitled folder", ok="Create")
+        if name and ("/" in name or name in (".", "..")):
+            self.show_toast("Could not create folder", "A folder name cannot contain \"/\" (it would be created outside the Desktop).")
+        elif name:
             try:
-                Gio.File.new_for_path(os.path.join(self._ddir, e.get_text().strip())).make_directory(None)
+                Gio.File.new_for_path(os.path.join(self._ddir, name)).make_directory(None)
             except GLib.Error as err:
                 self.show_toast("Could not create folder", err.message[:80])
-        d.destroy()
 
     def open_uri(self, uri, force_default=False):
         if not force_default and uri and shutil.which("sparkfiles") and (uri == "trash:///" or (uri.startswith("file://") and os.path.isdir(Gio.File.new_for_uri(uri).get_path() or ""))):
@@ -1348,13 +1288,11 @@ class LiveShell:
                 self.refresh_network()
 
     def reset_widget_positions(self, key=None):
-        d = config.load()
         if key:
-            d.get("widget_pos", {}).pop(key, None)
+            config.remove("widget_pos", key)
             self.wpos.pop(key, None)
         else:
-            d.pop("widget_pos", None); self.wpos.clear()
-        config.save(d)
+            config.remove("widget_pos"); self.wpos.clear()
         self.relayout()
 
     def _load_widget_state(self, initial=False):
@@ -1469,23 +1407,40 @@ class LiveShell:
         self.wifi_ico.set_tooltip_text(("Wired network connected" if (wired and not wifi_up) else "Network connected") if any_up else "No network connection")
 
     def _poll_ssid(self):
-        services.run_async(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
-                           lambda out: setattr(self, "ssid", next((l.split(":", 1)[1] for l in (out or "").splitlines()
-                                                                   if l.startswith("yes:")), None)))
+        def got(ok, out, err):
+            self.ssid = next((netbt.split_terse(l)[1] for l in out.splitlines() if l.startswith("yes:") and len(netbt.split_terse(l)) > 1), None)
+        netbt.run(["nmcli", "-t", "-f", "ACTIVE,SSID", "device", "wifi"], got)
 
     # -------------------------------------------------------- bluetooth card
     def _card_bluetooth(self):
         c = self._card("Bluetooth", "bluetooth")
         self.bt_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         c.body.pack_start(self.bt_box, False, False, 0)
-        self.bt_present = shutil.which("bluetoothctl") and os.path.isdir("/sys/class/bluetooth") and bool(os.listdir("/sys/class/bluetooth"))
+        self.bt_present = False
+        # one BlueZ client for the whole session: it answers pairing requests from phones, keeps the panel icon right and survives hot-plugging
+        self.bt = netbt.Bluetooth(agent_ui=None if self.demo else netui.AgentUI(self._net_host()))
+        self.bt.add_listener(self._bt_changed)
+        if not self.demo:
+            GLib.idle_add(lambda: (self.bt.start(), False)[1])
         return c
+
+    def _bt_changed(self):
+        present = bool(self.bt.available)
+        if present != self.bt_present:
+            self.bt_present = present
+            if getattr(self, "tray_btns", None):
+                self.tray_btns["bluetooth"].set_visible(bool(prefs.get("panel.tray_bluetooth") and (present or self.demo)))
+        self.refresh_bt()
 
     def refresh_bt(self, devices=None):
         for ch in self.bt_box.get_children():
             self.bt_box.remove(ch)
-        if devices is None and not self.bt_present:
-            self.bt_box.pack_start(self._empty("No Bluetooth adapter found. Plug one in and it will appear here."), False, False, 0)
+        if devices is None:
+            devices = [d.title for d in self.bt.connected_devices()]
+        if not self.bt_present and not self.demo:
+            self.bt_box.pack_start(self._empty(netui.bt_problem(self.bt) or "No Bluetooth adapter found. Plug one in and it will appear here."), False, False, 0)
+        elif not self.bt.powered and not self.demo:
+            self.bt_box.pack_start(self._empty("Bluetooth is off."), False, False, 0)
         elif not devices:
             self.bt_box.pack_start(self._empty("No devices connected."), False, False, 0)
         else:
@@ -1494,13 +1449,10 @@ class LiveShell:
                 v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
                 v.pack_start(label(name, "title"), False, False, 0); v.pack_start(label("Connected", "muted"), False, False, 0)
                 r.pack_start(v, True, True, 0); self.bt_box.pack_start(r, False, False, 0)
-        self.bt_ico.color = (1, 1, 1, 0.9 if devices else 0.45); self.bt_ico.queue_draw()
+        if getattr(self, "bt_ico", None) is not None:
+            self.bt_ico.color = (1, 1, 1, 0.9 if devices else 0.45); self.bt_ico.queue_draw()
+            self.bt_ico.set_tooltip_text("Bluetooth: " + netui.bt_summary(self.bt))
         self.bt_box.show_all()
-
-    def _poll_bt(self):
-        if self.bt_present:
-            services.run_async(["bluetoothctl", "devices", "Connected"],
-                               lambda out: self.refresh_bt([l.split(" ", 2)[2] for l in (out or "").splitlines() if l.count(" ") >= 2]))
 
     # ------------------------------------------------------------ phone card
     def _card_phone(self):
@@ -1654,6 +1606,7 @@ class LiveShell:
         return True
 
     def power_menu(self, btn):
+        self.close_flyouts()
         ok = True                                   # nested test sessions simulate the action (see do_power) instead of greying the buttons out
         items = [("head", "Session"),
                  ("itemi", "arrow_right", "Log out", lambda: self.confirm_power("logout")),
@@ -1844,6 +1797,8 @@ class LiveShell:
     def show_toast(self, title, body, icon=None, timeout=-1):
         self.toast_t.set_text(title); self.toast_b.set_text(body.replace("\n", " "))
         if self.use_popups:
+            self.toast_wrap.restyle(); self.toast_icon.set_icon("bell", scheme.ink())
+        if self.use_popups:
             pos = prefs.get("notifications.position")
             mx, my, mw, mh = self.mon
             x = mx + {"top-right": mw - 340 - 16, "top-left": 16}.get(pos, (mw - 340) // 2)
@@ -2021,6 +1976,7 @@ class LiveShell:
         if getattr(self, "_hover", None) is None:
             self._hover = WindowHover(self)
         h = self._hover
+        h.restyle()
         h.keep()
         if getattr(self, "_hover_t", None):
             GLib.source_remove(self._hover_t)
@@ -2373,7 +2329,10 @@ class LiveShell:
                 try:
                     pb = th.load_icon("application-x-executable", size, Gtk.IconLookupFlags.FORCE_SIZE)
                 except GLib.Error:
-                    continue
+                    # no icon theme at all (minimal install, broken theme setting): show the app with a blank icon. It used to be skipped,
+                    # so the launcher listed nothing and no application could be started from it.
+                    pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, size, size)
+                    pb.fill(0x00000000)
             name = app.get_display_name()
             desc = (app.get_description() or app.get_generic_name() or "").strip().replace("\n", " ")
             desc = desc if len(desc) <= 46 else desc[:45] + "\u2026"
@@ -2455,8 +2414,13 @@ class LiveShell:
             self._l_busy = True
             self.cats.select_row(self.cats.get_row_at_index(1))
             self._l_busy = False
+        # Refiltering while the IconView is attached to filter -> sort models unbalances GTK3's row reference counts (a stream of
+        # "gtk_tree_model_*_unref_node: assertion 'elt->ref_count > 0' failed" criticals whenever the result set emptied or refilled).
+        # Detach the view for the refilter: the results change anyway, so there is no selection or scroll position worth keeping.
+        self.l_view.set_model(None)
         self.l_filter.refilter()
         self.l_sort.set_sort_column_id(1, Gtk.SortType.ASCENDING)
+        self.l_view.set_model(self.l_sort)
         self.empty_l.set_visible(len(self.l_sort) == 0)
         if hasattr(self, "l_sect"):
             self._l_sync_chrome()
@@ -2532,7 +2496,7 @@ class LiveShell:
     def open_launcher(self, text=None, enter=False):
         if not self.launcher_visible:
             self._opened_at = time.time()
-            self.close_tray()
+            self.close_flyouts(keep="launcher")
             self._l_apply_layout()
             self._l_fill()
             self.cats.select_row(self.cats.get_row_at_index(1 if not self.favs else 0))
@@ -2572,9 +2536,16 @@ class LiveShell:
             msg = e.message
         if not ok:                               # fall back to running the Exec line directly
             try:
-                cmd = (app.get_commandline() or "").split()
-                cmd = [c for c in cmd if not (c.startswith("%") and len(c) == 2)]
-                GLib.spawn_async(cmd, flags=GLib.SpawnFlags.SEARCH_PATH)
+                import shlex
+                cmd = [c for c in shlex.split(app.get_commandline() or "") if not (c.startswith("%") and len(c) == 2)]   # .split() broke quoted args
+                if not cmd:
+                    raise ValueError("empty command line")
+                if app.get_boolean("Terminal"):
+                    # GLib only knows a fixed list of terminals; with just sparkterm installed every Terminal=true app (htop, vim ...) failed here,
+                    # and was then run with no terminal at all while reporting success
+                    services.fire(["sparkterm", "-e"] + cmd)
+                else:
+                    GLib.spawn_async(cmd, flags=GLib.SpawnFlags.SEARCH_PATH)
                 ok = True
             except Exception as e2:
                 msg = msg or str(e2)
@@ -2612,10 +2583,7 @@ class LiveShell:
             self.refresh_network(); self._poll_ssid()
         else:
             self._update_net_icon()
-        if self.bt_present:
-            if "bluetooth" in self.enabled:
-                self._poll_bt()
-        elif not getattr(self, "_bt_drawn", False):
+        if not getattr(self, "_bt_drawn", False):
             self._bt_drawn = True; self.refresh_bt()
         return True
 
@@ -2895,9 +2863,9 @@ class LiveShell:
         self.refresh_dock()
         self.rebuild_icons()
         self.apply_widgets()
-        for pw in (getattr(self, "launcher_wrap", None), getattr(self, "toast_wrap", None), self.tray):
+        for pw in (getattr(self, "launcher_wrap", None), getattr(self, "toast_wrap", None), self.tray, getattr(self, "_hover", None)):
             if isinstance(pw, Popup):
-                pw.queue_draw()
+                pw.restyle()
         return False
 
     def _apply_accent(self):

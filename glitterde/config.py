@@ -1,4 +1,5 @@
 """User settings (~/.config/glitterde/settings.toml): written by SparkSettings, read by shell/WM/apps."""
+import contextlib
 import os
 
 from .tokens import _load
@@ -56,11 +57,14 @@ def load(name="settings.toml"):
 def _fmt(v):
     if isinstance(v, bool):
         return "true" if v else "false"
+    if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+        return "0.0"                                       # nan / inf are not valid settings (and not valid TOML)
     if isinstance(v, (int, float)):
         return repr(v)
     if isinstance(v, (list, tuple)):
         return "[" + ", ".join(_fmt(x) for x in v) + "]"
-    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    s = str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return '"' + s + '"'
 
 
 def save(data, name="settings.toml"):
@@ -70,13 +74,59 @@ def save(data, name="settings.toml"):
         out.append("[%s]" % sec)
         out += ["%s = %s" % (k, _fmt(v)) for k, v in vals.items()]
         out.append("")
-    tmp = path(name) + ".tmp"
-    with open(tmp, "w") as f:
-        f.write("\n".join(out))
-    os.replace(tmp, path(name))            # atomic: watchers never see a half-written file
+    tmp = "%s.%d.tmp" % (path(name), os.getpid())           # per-process name: the shell, WM and Settings can all save at once
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(out))
+        os.replace(tmp, path(name))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise            # atomic: watchers never see a half-written file
+
+
+@contextlib.contextmanager
+def edit(name="settings.toml"):
+    """Locked read-modify-write:   with config.edit() as d: d["panel"]["x"] = 1   (saved when the block ends, not saved if it raises).
+    The shell, the WM and Settings all change this file; without the lock two near-simultaneous changes each started from the same old
+    contents and one of them was silently lost."""
+    os.makedirs(config_dir(), exist_ok=True)
+    lock = None
+    try:
+        import fcntl
+        lock = open(path(name) + ".lock", "w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    except (ImportError, OSError):
+        lock = None
+    try:
+        d = load(name)
+        yield d
+        save(d, name)
+    finally:
+        if lock is not None:
+            lock.close()
+
+
+def update(changes, name="settings.toml"):
+    """Several settings in ONE write: update({"panel": {"position": "top"}, "dock": {"position": "left"}}). One write means one reload
+    in the shell and the WM instead of one per setting."""
+    with edit(name) as d:
+        for section, vals in changes.items():
+            d.setdefault(section, {}).update(vals)
 
 
 def set(section, key, value, name="settings.toml"):
-    d = load(name)
-    d.setdefault(section, {})[key] = value
-    save(d, name)
+    update({section: {key: value}}, name)
+
+
+def remove(section, key=None, name="settings.toml"):
+    """Delete one setting, or the whole section when key is None. An emptied section is removed too."""
+    with edit(name) as d:
+        if key is None:
+            d.pop(section, None)
+        else:
+            d.get(section, {}).pop(key, None)
+            if section in d and not d[section]:
+                d.pop(section)

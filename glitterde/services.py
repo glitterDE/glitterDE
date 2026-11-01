@@ -4,6 +4,7 @@ Everything reads standard Linux interfaces (/proc, /sys, D-Bus, XDG .desktop fil
 and degrades to "unavailable" instead of failing when a facility is missing.
 """
 import os
+import re
 import shutil
 import time
 
@@ -20,7 +21,12 @@ def run_async(argv, cb):
         GLib.idle_add(cb, None)
         return
     try:
-        p = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+        # every caller parses this output (volume, mute, sink names ...): pactl and friends translate their labels and yes/no, which
+        # silently broke mute detection and the output-device list on non-English systems
+        launcher = Gio.SubprocessLauncher.new(Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+        for k in ("LC_ALL", "LANG", "LANGUAGE"):
+            launcher.setenv(k, "C", True)
+        p = launcher.spawnv(argv)
     except GLib.Error:
         GLib.idle_add(cb, None)
         return
@@ -151,7 +157,7 @@ class Stats:
     def cpu(self):
         with open("/proc/stat") as f:
             v = [int(x) for x in f.readline().split()[1:]]
-        idle, tot = v[3] + v[4], sum(v)
+        idle, tot = v[3] + v[4], sum(v[:8])         # not guest / guest_nice: the kernel already counts them inside user / nice
         prev, self._cpu = self._cpu, (idle, tot)
         if not prev or tot <= prev[1]:
             return 0.0
@@ -219,22 +225,56 @@ def interfaces():
     return out
 
 
-def battery():
-    """(percent, charging) or None on machines without a battery."""
-    base = "/sys/class/power_supply"
+def _read(path):
+    with open(path) as f:
+        return f.read().strip()
+
+
+def battery(base="/sys/class/power_supply"):
+    """(percent, charging) for the machine's own battery, or None when it has none.
+    Peripheral batteries (wireless mouse, keyboard, game pad: scope "Device") are not the machine's battery; a laptop with two
+    batteries is shown as one, weighted by capacity; batteries that only report energy_*/charge_* (no "capacity" file) still work."""
     if not os.path.isdir(base):
         return None
+    cells = []                                    # (now, full, percent, status)
     for n in sorted(os.listdir(base)):
         p = os.path.join(base, n)
         try:
-            if open(os.path.join(p, "type")).read().strip() != "Battery":
+            if _read(os.path.join(p, "type")) != "Battery":
                 continue
-            pct = int(open(os.path.join(p, "capacity")).read())
-            st = open(os.path.join(p, "status")).read().strip()
-            return pct, st in ("Charging", "Full")
-        except (OSError, ValueError):
+            try:
+                if _read(os.path.join(p, "scope")) == "Device":
+                    continue
+            except OSError:
+                pass                                # no scope file = the system's own battery
+            status = _read(os.path.join(p, "status"))
+        except OSError:
             continue
-    return None
+        pct = None
+        try:
+            pct = int(_read(os.path.join(p, "capacity")))
+        except (OSError, ValueError):
+            pass
+        now = full = None
+        for a, b in (("energy_now", "energy_full"), ("charge_now", "charge_full")):
+            try:
+                now, full = int(_read(os.path.join(p, a))), int(_read(os.path.join(p, b)))
+                break
+            except (OSError, ValueError):
+                now = full = None
+        if pct is None and full:
+            pct = round(100.0 * now / full)
+        if pct is not None:
+            cells.append((now, full, max(0, min(100, pct)), status))
+    if not cells:
+        return None
+    if len(cells) > 1 and all(c[1] for c in cells):
+        pct = round(100.0 * sum(c[0] for c in cells) / sum(c[1] for c in cells))
+    else:
+        pct = round(sum(c[2] for c in cells) / len(cells))
+    stats = [c[3] for c in cells]
+    # "Full" on one battery while the other still discharges (ThinkPads do this) is not "plugged in"
+    return max(0, min(100, pct)), ("Charging" in stats) or all(st == "Full" for st in stats)
 
 
 # -------------------------------------------------------- volume / brightness
@@ -281,25 +321,107 @@ class Audio:
         elif self.backend == "pactl":
             fire(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"])
 
+    # ---- output devices
+    def sinks(self, cb):
+        """cb([(key, label, is_default), ...]): every audio output (speakers, headphones, HDMI, Bluetooth ...). `key` is what set_default() wants."""
+        if self.backend == "wpctl":
+            run_async(["wpctl", "status"], lambda out: cb(parse_wpctl_sinks(out or "")))
+        elif self.backend == "pactl":
+            def listed(out):
+                found = parse_pactl_sinks(out or "")
+                run_async(["pactl", "get-default-sink"], lambda d: cb([(k, lab, k == (d or "").strip()) for k, lab in found]))
+            run_async(["pactl", "list", "sinks"], listed)
+        else:
+            cb([])
+
+    def set_default(self, key, done=None):
+        """Make `key` (from sinks()) the default output. Streams that are playing move with it. done() runs afterwards."""
+        key = str(key)
+        if self.backend == "wpctl":                            # WirePlumber moves the running streams by itself
+            run_async(["wpctl", "set-default", key], lambda _o: done and done())
+        elif self.backend == "pactl":
+            def moved(out):
+                for line in (out or "").splitlines():
+                    sid = line.split("\t")[0].strip()
+                    if sid.isdigit():
+                        fire(["pactl", "move-sink-input", sid, key])
+                if done:
+                    done()
+            run_async(["pactl", "set-default-sink", key],
+                      lambda _o: run_async(["pactl", "list", "short", "sink-inputs"], moved))
+        elif done:
+            done()
+
+
+def parse_wpctl_sinks(text):
+    """[(id, label, is_default)] from `wpctl status` (the lines under  Audio > Sinks:). The default output carries a '*'."""
+    out, in_audio, in_sinks = [], False, False
+    for raw in text.splitlines():
+        line = raw.strip(" \t│├└─")
+        if not raw.startswith((" ", "\t", "│", "├", "└")) and line:                    # a top-level heading: Audio / Video / Settings
+            in_audio, in_sinks = line == "Audio", False
+            continue
+        if not in_audio or not line:
+            continue
+        if line.endswith(":") and not line[0].isdigit() and not line.startswith("*"):  # a tree heading: Devices: / Sinks: / Sources: ...
+            in_sinks = line == "Sinks:"
+            continue
+        if not in_sinks:
+            continue
+        m = re.match(r"^(\*)?\s*(\d+)\.\s+(.+?)(?:\s+\[vol:[^\]]*\])?\s*$", line)
+        if m:
+            out.append((m.group(2), m.group(3), bool(m.group(1))))
+    return out
+
+
+def parse_pactl_sinks(text):
+    """[(name, description)] from `pactl list sinks`."""
+    out, name = [], None
+    for line in text.splitlines():
+        t = line.strip()
+        if t.startswith("Sink #"):
+            name = None
+        elif t.startswith("Name:"):
+            name = t[5:].strip()
+        elif t.startswith("Description:") and name:
+            out.append((name, t[12:].strip() or name))
+            name = None
+    return out
+
 
 class Backlight:
-    def __init__(self):
-        base = "/sys/class/backlight"
-        self.dir = None
-        if os.path.isdir(base) and os.listdir(base):
-            self.dir = os.path.join(base, sorted(os.listdir(base))[0])
+    """Screen brightness. Reads sysfs, sets through brightnessctl (needs no root). The SAME device is used for both: with several
+    (acpi_video0 + intel_backlight is common) the slider used to read one and brightnessctl change another."""
+    RANK = {"raw": 0, "platform": 1, "firmware": 2}                 # the kernel's documented order of preference
+
+    def __init__(self, base="/sys/class/backlight"):
+        self.dir = self.name = None
+        try:
+            names = os.listdir(base)
+        except OSError:
+            names = []
+
+        def rank(n):
+            try:
+                t = _read(os.path.join(base, n, "type"))
+            except OSError:
+                t = ""
+            return (self.RANK.get(t, 3), n)
+        if names:
+            self.name = min(names, key=rank)
+            self.dir = os.path.join(base, self.name)
         self.available = bool(self.dir and shutil.which("brightnessctl"))
 
     def get(self):
         try:
-            cur = int(open(os.path.join(self.dir, "brightness")).read())
-            mx = int(open(os.path.join(self.dir, "max_brightness")).read())
-            return cur / mx
+            cur = int(_read(os.path.join(self.dir, "brightness")))
+            mx = int(_read(os.path.join(self.dir, "max_brightness")))
+            return max(0.0, min(1.0, cur / mx))
         except Exception:
             return None
 
     def set(self, v):
-        fire(["brightnessctl", "set", "%d%%" % round(max(0.05, min(1, v)) * 100)])
+        fire(["brightnessctl", "-d", self.name, "set", "%d%%" % round(max(0.05, min(1, v)) * 100)])
 
 
 # --------------------------------------------------- notification daemon
@@ -317,7 +439,8 @@ NOTIF_XML = """<node><interface name="org.freedesktop.Notifications">
 
 class Notification:
     def __init__(self, nid, app, icon, summary, body, urgency, timeout):
-        self.id, self.app, self.icon, self.summary, self.body = nid, app, icon, summary, body
+        # any local program can send these: bound them so one huge message cannot stall the panel while GTK lays the text out
+        self.id, self.app, self.icon, self.summary, self.body = nid, (app or "")[:80], (icon or "")[:512], (summary or "")[:200], (body or "")[:1500]
         self.urgency, self.timeout, self.time = urgency, timeout, time.time()
 
 
@@ -346,9 +469,10 @@ class NotificationServer:
 
     def _call(self, conn, sender, path, iface, method, params, inv):
         if method == "GetCapabilities":
-            inv.return_value(GLib.Variant("(as)", (["body", "actions", "persistence"],)))
+            inv.return_value(GLib.Variant("(as)", (["body", "persistence"],)))      # not "actions": there is no ActionInvoked signal, so apps would wait for clicks that never come
         elif method == "GetServerInformation":
-            inv.return_value(GLib.Variant("(ssss)", ("glitterde-notify", "glitterDE", "0.2", "1.2")))
+            from . import __version__
+            inv.return_value(GLib.Variant("(ssss)", ("glitterde-notify", "glitterDE", __version__, "1.2")))
         elif method == "CloseNotification":
             nid = params.unpack()[0]
             inv.return_value(None)
@@ -610,121 +734,8 @@ def default_favorites(apps, configured=None):
     return favs
 
 
-# ------------------------------------------------- network / Bluetooth helpers (nmcli, bluetoothctl)
 def have(tool):
     return shutil.which(tool) is not None
 
 
-def wifi_radio(cb):
-    run_async(["nmcli", "radio", "wifi"], lambda o: cb(o is not None and "enabled" in o))
-
-
-def wifi_set_radio(on):
-    fire(["nmcli", "radio", "wifi", "on" if on else "off"])
-
-
-def wifi_scan(cb):
-    """cb([(in_use, ssid, signal, security)]) sorted: connected first, then by signal."""
-    def done(out):
-        seen, rows = set(), []
-        for ln in (out or "").splitlines():
-            f = [x.replace("\x00", ":") for x in ln.replace("\\:", "\x00").split(":")]
-            if len(f) >= 4 and f[1] and f[1] not in seen:
-                seen.add(f[1])
-                try:
-                    rows.append((f[0] == "*", f[1], int(f[2] or 0), f[3]))
-                except ValueError:
-                    pass
-        rows.sort(key=lambda r: (not r[0], -r[2]))
-        cb(rows)
-    run_async(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list", "--rescan", "auto"], done)
-
-
-def wifi_connect(ssid, password, cb):
-    argv = ["nmcli", "-w", "20", "dev", "wifi", "connect", ssid] + (["password", password] if password else [])
-    run_async(argv, lambda o: cb(o is not None))
-
-
-def bt_adapter():
-    return have("bluetoothctl") and os.path.isdir("/sys/class/bluetooth") and bool(os.listdir("/sys/class/bluetooth"))
-
-
-def bt_powered(cb):
-    run_async(["bluetoothctl", "show"], lambda o: cb("Powered: yes" in (o or "")))
-
-
-def bt_set_power(on):
-    fire(["bluetoothctl", "power", "on" if on else "off"])
-
-
-def bt_devices(cb):
-    """cb([(mac, name, connected)]) for paired devices."""
-    def with_conn(conn_out):
-        conn = {l.split(" ", 2)[1] for l in (conn_out or "").splitlines() if l.count(" ") >= 2}
-
-        def done(out):
-            rows = []
-            for ln in (out or "").splitlines():
-                p = ln.split(" ", 2)
-                if len(p) >= 3:
-                    rows.append((p[1], p[2], p[1] in conn))
-            cb(rows)
-        run_async(["bluetoothctl", "devices", "Paired"], done)
-    run_async(["bluetoothctl", "devices", "Connected"], with_conn)
-
-
-def bt_toggle(mac, connected):
-    fire(["bluetoothctl", "disconnect" if connected else "connect", mac])
-
-
-def run_async_err(argv, cb):
-    """Like run_async, but cb(ok, stdout, stderr): the error text is how we tell the user WHY a connection failed."""
-    if not shutil.which(argv[0]):
-        GLib.idle_add(cb, False, "", "%s is not installed" % argv[0]); return
-    try:
-        p = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
-    except GLib.Error as e:
-        GLib.idle_add(cb, False, "", e.message); return
-
-    def done(proc, res):
-        try:
-            ok, out, err = proc.communicate_utf8_finish(res)
-            cb(bool(ok and proc.get_successful()), out or "", err or "")
-        except GLib.Error as e:
-            cb(False, "", e.message)
-    p.communicate_utf8_async(None, None, done)
-
-
-def net_error(text):
-    """nmcli failure text -> (kind, short human sentence). kind 'password' means: ask for / re-ask the password."""
-    t = (text or "").lower()
-    if any(k in t for k in ("secrets were required", "password", "802-1x", "no suitable", "authentication")):
-        return "password", "Password needed"
-    if "no network with ssid" in t or "not found" in t:
-        return "failed", "Not found. Out of range?"
-    if "timeout" in t or "timed out" in t:
-        return "failed", "Timed out. Try again"
-    if "unavailable" in t or "not ready" in t or "rfkill" in t or "not available" in t:
-        return "failed", "Wi-Fi is off or unavailable"
-    last = [l.strip() for l in (text or "").splitlines() if l.strip()]
-    msg = last[-1].replace("Error: ", "") if last else "Could not connect"
-    return "failed", msg[:70]
-
-
-def bt_result(ok, text, connecting):
-    """bluetoothctl output -> (success, short human sentence)."""
-    t = (text or "").lower()
-    if "connection successful" in t or "successful disconnected" in t or "alreadyconnected" in t.replace(".", "").replace(" ", ""):
-        return True, "Connected" if connecting else "Disconnected"
-    if "not available" in t:
-        return False, "Not found. Turn it on and move closer"
-    if "no default controller" in t or "powered off" in t or "notready" in t.replace(".", "").replace(" ", ""):
-        return False, "Bluetooth is off"
-    if "inprogress" in t.replace(".", "").replace(" ", ""):
-        return False, "Another connection is in progress"
-    if "failed to connect" in t or "org.bluez.error" in t:
-        return False, "Could not connect. Is it on and in range?"
-    if ok and "fail" not in t:
-        return True, "Connected" if connecting else "Disconnected"
-    last = [l.strip() for l in (text or "").splitlines() if l.strip()]
-    return False, (last[-1][:70] if last else "No answer from the device")
+# Wi-Fi / Ethernet / Bluetooth live in netbt.py (backend) and netui.py (widgets).

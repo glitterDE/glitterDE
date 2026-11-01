@@ -50,7 +50,10 @@ def _v(v):
         return repr(v)
     if isinstance(v, (list, tuple)):
         return "[" + ", ".join(_v(x) for x in v) + "]"
-    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    s = str(v).replace("\\", "\\\\").replace('"', '\\"')
+    for ch, esc in (("\n", "\\n"), ("\r", "\\r"), ("\t", "\\t")):        # a raw newline in a theme name would make the file invalid TOML
+        s = s.replace(ch, esc)
+    return '"' + s + '"'
 
 
 def dump_toml(d):
@@ -79,7 +82,8 @@ def hex_of(rgba):
 
 
 def is_user_theme(theme):
-    return os.path.abspath(theme.dir).startswith(os.path.abspath(USER_DIR))
+    root = os.path.abspath(USER_DIR)
+    return os.path.abspath(theme.dir).startswith(root + os.sep)       # not just a prefix: ".../themes-old" is not inside ".../themes"
 
 
 def delete_user_theme(theme):
@@ -94,9 +98,9 @@ def write_theme(tid, name, meta, pal):
     os.makedirs(d, exist_ok=True)
     meta = copy.deepcopy(meta)
     meta.update(schema=1, id=tid, name=name, author="You", version="1.0.0")
-    with open(os.path.join(d, "theme.toml"), "w") as f:
+    with open(os.path.join(d, "theme.toml"), "w", encoding="utf-8") as f:
         f.write("# glitterDE theme made with the SparkSettings theme editor\n" + dump_toml(meta))
-    with open(os.path.join(d, "palette.toml"), "w") as f:
+    with open(os.path.join(d, "palette.toml"), "w", encoding="utf-8") as f:
         f.write("# %s\n# Semantic palette + materials\n" % name + dump_toml(pal))
     return d
 
@@ -190,7 +194,7 @@ class ThemeEditor(Gtk.Dialog):
     def _colour(self, path, rgba):
         _set(self.pal, path, hex_of((rgba.red, rgba.green, rgba.blue)))
         if path == ("accent", "primary"):
-            d = config.load(); d.pop("accent", None); config.save(d)             # an accent picked on the Colours page would hide this one
+            config.remove("accent")                                                # an accent picked on the Colours page would hide this one
         self._changed()
 
     def _glass(self, what, factor):
@@ -228,10 +232,9 @@ class ThemeEditor(Gtk.Dialog):
             for fn, data in self.backup.items():
                 with open(os.path.join(self.base.dir, fn), "wb") as f:
                     f.write(data)
-            cfg = config.load()
-            cfg.setdefault("appearance", {})["theme"] = self.prev_theme
+            restore = {"appearance": {"theme": self.prev_theme}}
             if self.prev_accent:
-                cfg.setdefault("accent", {})["primary"] = self.prev_accent
-            config.save(cfg)
+                restore["accent"] = {"primary": self.prev_accent}
+            config.update(restore)
         self.destroy()
         self.on_done()

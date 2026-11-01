@@ -62,6 +62,15 @@ APP_CSS = b"""
 .darkpanel .tilebtn:checked, .darkpanel .tilebtn.sel { background-color: rgba(255,115,196,0.26); border-color: #ff73c4; }
 .darkpanel iconview.view { background: transparent; background-color: transparent; color: #ecebfa; font-size: 11px; }
 .darkpanel iconview.view:selected, .darkpanel iconview.view:hover { background-color: rgba(255,255,255,0.14); color: #ffffff; border-radius: 12px; }
+/* tree views (SparkFiles list view, file choosers ...): the base sheet makes every .view transparent, which also hid the selection */
+.lightpanel treeview.view { color: #2a2d6e; }
+.darkpanel treeview.view { color: #ecebfa; }
+.lightpanel treeview.view:selected, .lightpanel treeview.view:selected:focus { background-color: rgba(96,108,255,0.40); color: #1f2160; border-radius: 0; }
+.darkpanel treeview.view:selected, .darkpanel treeview.view:selected:focus { background-color: rgba(168,150,255,0.46); color: #ffffff; border-radius: 0; }
+.lightpanel treeview.view header button { color: #2a2d6e; background: transparent; border: none; box-shadow: none; }
+.darkpanel treeview.view header button { color: #ecebfa; background: transparent; border: none; box-shadow: none; }
+progressbar trough { background-color: rgba(120,120,220,0.30); border: none; border-radius: 4px; min-height: 8px; }
+progressbar progress { background-image: linear-gradient(to right, #ffb8e6, #ff8fd2); border: none; border-radius: 4px; min-height: 8px; }
 scale trough { background-color: rgba(120,120,220,0.30); border-radius: 3px; min-height: 5px; }
 scale highlight { background-image: linear-gradient(to right, #ffb8e6, #ff8fd2); border-radius: 3px; }
 scale slider { background-color: #fff; border-radius: 9px; min-width: 16px; min-height: 16px; border: none; box-shadow: 0 1px 4px rgba(60,40,140,0.35); }
@@ -72,6 +81,37 @@ notebook, notebook > header, notebook > stack { background: transparent; border:
 notebook > header > tabs > tab { background-color: rgba(255,255,255,0.10); border-radius: 12px; padding: 4px 10px; margin: 2px; border: none; min-height: 0; }
 notebook > header > tabs > tab:checked { background-color: rgba(255,255,255,0.26); }
 """
+
+# stock Gtk dialogs (file choosers, app chooser ...) cannot be glass; they get an opaque surface in the scheme's colours instead of the
+# transparent one the base sheet would give them (black on a window without an alpha channel).
+STOCK_CSS = b"""
+.glitter-stock.lightpanel, .glitter-stock.lightpanel .background { background-color: #efecfb; color: #2a2d6e; }
+.glitter-stock.darkpanel, .glitter-stock.darkpanel .background { background-color: #23243f; color: #ecebfa; }
+.glitter-stock.lightpanel label, .glitter-stock.lightpanel button, .glitter-stock.lightpanel treeview.view, .glitter-stock.lightpanel entry { color: #2a2d6e; }
+.glitter-stock.darkpanel label, .glitter-stock.darkpanel button, .glitter-stock.darkpanel treeview.view, .glitter-stock.darkpanel entry { color: #ecebfa; }
+.glitter-stock button { background-image: none; border-radius: 10px; padding: 5px 14px; min-height: 0; box-shadow: none; text-shadow: none; }
+.glitter-stock.lightpanel button { background-color: rgba(42,45,110,0.08); border: 1px solid rgba(42,45,110,0.16); }
+.glitter-stock.lightpanel button:hover { background-color: rgba(96,108,255,0.20); }
+.glitter-stock.darkpanel button { background-color: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.20); }
+.glitter-stock.darkpanel button:hover { background-color: rgba(255,255,255,0.18); }
+.glitter-stock.lightpanel entry { background-color: rgba(255,255,255,0.8); border: 1px solid rgba(42,45,110,0.22); }
+.glitter-stock.darkpanel entry { background-color: rgba(255,255,255,0.09); border: 1px solid rgba(255,255,255,0.18); }
+.glitter-stock.lightpanel treeview.view, .glitter-stock.darkpanel treeview.view { background-color: transparent; }
+.glitter-stock.lightpanel scrolledwindow, .glitter-stock.darkpanel scrolledwindow { border: 1px solid rgba(128,128,200,0.25); border-radius: 8px; }
+"""
+_stock_installed = False
+
+
+def style_stock_dialog(d):
+    """Make a plain Gtk dialog (FileChooserDialog, AppChooserDialog ...) legible: opaque surface and ink that follow the colour scheme."""
+    global _stock_installed
+    if not _stock_installed:
+        p = Gtk.CssProvider(); p.load_from_data(STOCK_CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_USER + 14)
+        _stock_installed = True
+    ctx = d.get_style_context()
+    ctx.add_class("glitter-stock"); ctx.add_class(scheme.panel_class())
+    return d
 
 
 def theme():
@@ -162,8 +202,8 @@ class GlassWindow(Gtk.Window):
             rad = 0 if self._maxed else self.th.rad(16)
             gfx.comp_glass(cr, a.width, a.height, 0, self.th.material(self.material), 1.0,
                            corners=(0, 0, rad, rad), sheen=False)
-            gfx.rrect_var(cr, 0.5, -20, a.width - 1, a.height + 19.5, 0, 0, rad, rad)   # side + bottom rim only
-            cr.set_source_rgba(1, 1, 1, 0.22); cr.set_line_width(1.0); cr.stroke()
+            gfx.rrect_var(cr, 0.5, -20, a.width - 1, a.height + 19.5, 0, 0, rad, rad)   # side + bottom rim only; the titlebar draws the top + upper sides
+            cr.set_source_rgba(*gfx.WINDOW_RIM); cr.set_line_width(1.0); cr.stroke()    # (the very same line, so edge and titlebar read as one frame)
             return False
         if "X11" in type(Gdk.Display.get_default()).__name__:
             r = gw.get_origin()
@@ -188,7 +228,7 @@ class GlassDialog(GlassWindow):
     does not end the application. Put content into .body; a Close button is provided (.close_btn)."""
 
     def __init__(self, title, wm_class, parent=None, size=(460, 10)):
-        super().__init__(title, wm_class, size=size)
+        super().__init__(title, wm_class, material="window_light", size=size)
         self.disconnect(self._quit_id)                       # GlassWindow ends the program when it is destroyed; a dialog must not
         self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
         if parent is not None:
@@ -212,3 +252,47 @@ class GlassDialog(GlassWindow):
 
     def get_content_area(self):
         return self.body
+
+
+class GlassPrompt(GlassDialog):
+    """A small modal question with a text field (rename, new folder, Wi-Fi password): glass like everything else, Enter confirms, Esc cancels.
+    result = GlassPrompt(...).run()  ->  the text, or None when cancelled."""
+
+    def __init__(self, title, prompt, default="", parent=None, ok="OK", secret=False, wm_class="glitterde-prompt"):
+        super().__init__(title, wm_class, parent=parent, size=(400, 10))
+        self._result, self._loop = None, None
+        self.set_modal(True)
+        self.close_btn.set_label("Cancel")
+        from .widgets import label as _label
+        box = self.body
+        box.set_margin_start(18); box.set_margin_end(18); box.set_margin_top(16); box.set_margin_bottom(14)
+        box.pack_start(_label(prompt, ellipsize=False), False, False, 0)
+        self.entry = Gtk.Entry(); self.entry.set_text(default); self.entry.set_activates_default(False)
+        self.entry.set_visibility(not secret)
+        self.entry.connect("activate", lambda *_: self._accept())
+        box.pack_start(self.entry, False, False, 4)
+        self.ok_btn = Gtk.Button(label=ok); self.ok_btn.get_style_context().add_class("pill")
+        self.ok_btn.get_style_context().add_class("active")
+        self.ok_btn.connect("clicked", lambda *_: self._accept())
+        row = self.close_btn.get_parent()                       # Cancel on the left, the action on the right
+        row.remove(self.close_btn)
+        row.pack_end(self.ok_btn, False, False, 6); row.pack_end(self.close_btn, False, False, 0)
+        self.connect("map", lambda *_: (self.entry.grab_focus(), self.entry.select_region(0, -1)))
+        self.connect("destroy", lambda *_: self._loop and self._loop.quit())
+
+    def _accept(self):
+        t = self.entry.get_text().strip()
+        if t:
+            self._result = t
+            self.destroy()
+
+    def run(self):
+        self._loop = GLib.MainLoop()
+        self.show_all()
+        self.present()
+        self._loop.run()
+        return self._result
+
+
+def ask_text(parent, title, prompt, default="", ok="OK", secret=False):
+    return GlassPrompt(title, prompt, default, parent=parent, ok=ok, secret=secret).run()
