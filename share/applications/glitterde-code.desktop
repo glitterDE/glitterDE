@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Code
+GenericName=SparkCode
+Comment=Code editor for glitterDE
+Exec=sparkcode %F
+Icon=glitterde-code
+Terminal=false
+Categories=Development;TextEditor;Utility;
+MimeType=text/plain;text/markdown;text/x-python;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-script.python;application/json;application/x-shellscript;application/xml;text/html;text/css;text/x-makefile;application/toml;application/x-yaml;inode/directory;
+StartupWMClass=sparkcode
+Keywords=editor;code;text;programming;ide;
