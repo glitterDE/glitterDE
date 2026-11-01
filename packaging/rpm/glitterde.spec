@@ -89,6 +89,7 @@ make install DESTDIR=%{buildroot} PREFIX=%{_prefix} LIBDIR=%{_prefix}/lib/glitte
 %{_bindir}/sparksettings
 %{_bindir}/sparkterm
 %{_bindir}/sparkcode
+%{_bindir}/sparkmonitor
 %{_datadir}/applications/glitterde-*.desktop
 %{_datadir}/xsessions/glitterde.desktop
 %{_datadir}/icons/hicolor/*/apps/glitterde-*
