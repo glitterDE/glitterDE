@@ -1,5 +1,6 @@
 """GTK3 building blocks: Desktop (wallpaper + glass behind real widgets), icons, rings, CSS."""
 import math
+import os
 
 import cairo
 import gi
@@ -63,6 +64,34 @@ entry.withicon { padding-left: 32px; }
 menu, .menu { background-color: rgba(58,50,130,0.93); border-radius: 12px; padding: 4px; border: 1px solid rgba(255,255,255,0.3); }
 menuitem { padding: 6px 12px; border-radius: 8px; }
 menuitem:hover { background-color: rgba(255,255,255,0.2); }
+/* Detail widgets (expanded Wi-Fi / Bluetooth rows, settings pages): the system GTK theme paints gradients, borders and its own accent on these,
+   so reset every layer it can add and restyle them in glitterDE's own look. */
+switch { background-image: none; border: 1px solid rgba(255,255,255,0.22); box-shadow: none; outline: none; }
+switch:checked { background-image: none; border-color: rgba(255,255,255,0.35); }
+switch slider { background-image: none; border: none; box-shadow: 0 1px 3px rgba(40,20,120,0.35); margin: 1px; }
+switch:disabled { opacity: 0.5; }
+entry { background-image: none; outline: none; }
+entry:disabled { opacity: 0.55; }
+button.clear:disabled, button.pill:disabled { opacity: 0.5; }
+checkbutton, radiobutton { background: transparent; box-shadow: none; }
+check, radio { background-image: none; background-color: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.40); border-radius: 6px; box-shadow: none;
+               min-width: 16px; min-height: 16px; color: #ffffff; -gtk-icon-source: none; }
+radio { border-radius: 999px; }
+check:checked, radio:checked { background-color: #ff73c4; border-color: rgba(255,255,255,0.55); -gtk-icon-source: -gtk-icontheme("object-select-symbolic"); }
+radio:checked { -gtk-icon-source: none; }
+spinner { color: rgba(255,255,255,0.9); }
+spinbutton { background-image: none; background-color: rgba(255,255,255,0.17); border: 1px solid rgba(255,255,255,0.30); border-radius: 12px; box-shadow: none; }
+spinbutton button { background-image: none; border-radius: 8px; border: none; }
+combobox button, combobox box button { background-image: none; background-color: rgba(255,255,255,0.17); border: 1px solid rgba(255,255,255,0.30); border-radius: 12px; }
+expander title { background: transparent; }
+expander arrow { color: rgba(255,255,255,0.9); }
+textview, textview text { background-color: transparent; background-image: none; color: #ffffff; }
+separator { background-color: rgba(255,255,255,0.18); min-height: 1px; min-width: 1px; }
+revealer, revealer > box, scrolledwindow > viewport > box, popover, popover > box { background-color: transparent; background-image: none; border: none; box-shadow: none; }
+scrolledwindow undershoot, scrolledwindow overshoot, scrolledwindow undershoot.top, scrolledwindow undershoot.bottom, scrolledwindow overshoot.top, scrolledwindow overshoot.bottom
+    { background-image: none; background-color: transparent; border: none; box-shadow: none; }
+levelbar trough { background-color: rgba(255,255,255,0.16); border: none; border-radius: 4px; min-height: 8px; }
+levelbar block.filled { background-color: #ff8fd2; border: none; border-radius: 4px; }
 """
 
 
@@ -228,7 +257,7 @@ class Ico(Gtk.DrawingArea):
                 ic.sparkle_logo(cr, a.width / 2, a.height / 2, self.px, self.color)
             return False
         if self.name == "battery":
-            ic.battery(cr, a.width / 2, a.height / 2, self.px, self.color, getattr(self, "pct", 0.74))
+            ic.battery(cr, a.width / 2, a.height / 2, self.px, self.color, getattr(self, "pct", 0.74), getattr(self, "charging", False))
         elif self.name == "sparkle_logo":
             ic.sparkle_logo(cr, a.width / 2, a.height / 2, self.px, self.color)
         else:
@@ -397,3 +426,155 @@ def round_shape(win, r):
         rects.append(cairo.RectangleInt(inset, i, w - 2 * inset, 1))
         rects.append(cairo.RectangleInt(inset, h - 1 - i, w - 2 * inset, 1))
     win.shape_combine_region(cairo.Region(rects))
+
+
+def week_start():
+    """0 = Monday, 6 = Sunday. The setting, or "auto": Sunday in the regions that start the week on Sunday, else Monday."""
+    from . import settings_model as prefs
+    v = prefs.get("panel.week_start")
+    if v in ("monday", "sunday"):
+        return 0 if v == "monday" else 6
+    import re
+    m = re.search(r"_([A-Z]{2})", os.environ.get("LC_TIME") or os.environ.get("LC_ALL") or os.environ.get("LANG") or "")
+    return 6 if m and m.group(1) in {"US", "CA", "MX", "BR", "JP", "IL", "IN", "PH", "TW", "HK", "KR", "ZA", "SA", "AR", "CO", "PE", "VE", "GT"} else 0
+
+
+class MonthGrid(Gtk.DrawingArea):
+    """Month calendar drawn by us (Gtk.Calendar cannot be styled into the glass look): today is a pink pill, a clicked day gets a ring,
+    the arrows / mouse wheel change the month.  on_change() is called after the visible month changes."""
+
+    HEAD, ROW = 24, 33
+
+    def __init__(self, on_change=None):
+        import datetime
+        super().__init__()
+        self.dt = datetime
+        t = datetime.date.today()
+        self.year, self.month, self.sel, self.hover = t.year, t.month, None, None
+        self.on_change = on_change
+        self.set_size_request(280, self.HEAD + 6 * self.ROW + 2)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK | Gdk.EventMask.SCROLL_MASK)
+        self.connect("button-press-event", self._press)
+        self.connect("motion-notify-event", self._motion)
+        self.connect("leave-notify-event", lambda *_: self._set_hover(None))
+        self.connect("scroll-event", lambda w, ev: (self.shift(1 if ev.direction in (Gdk.ScrollDirection.DOWN, Gdk.ScrollDirection.RIGHT) else -1), True)[1])
+
+    def title(self):
+        return self.dt.date(self.year, self.month, 1).strftime("%B %Y")
+
+    def shift(self, n):
+        m = self.month - 1 + n
+        self.year, self.month = self.year + m // 12, m % 12 + 1
+        self.queue_draw()
+        if self.on_change:
+            self.on_change()
+
+    def go_today(self):
+        t = self.dt.date.today()
+        self.year, self.month, self.sel = t.year, t.month, None
+        self.queue_draw()
+        if self.on_change:
+            self.on_change()
+
+    def _cells(self):
+        first = self.dt.date(self.year, self.month, 1)
+        off = (first.weekday() - week_start()) % 7
+        start = first - self.dt.timedelta(days=off)
+        return [start + self.dt.timedelta(days=i) for i in range(42)]
+
+    def _at(self, x, y):
+        if y < self.HEAD:
+            return None
+        c, r = int(x / (self.get_allocated_width() / 7.0)), int((y - self.HEAD) // self.ROW)
+        return self._cells()[r * 7 + c] if 0 <= c < 7 and 0 <= r < 6 else None
+
+    def _press(self, w, ev):
+        d = self._at(ev.x, ev.y)
+        if d is not None and ev.button == 1:
+            self.sel = d
+            if (d.year, d.month) != (self.year, self.month):
+                self.year, self.month = d.year, d.month
+                if self.on_change:
+                    self.on_change()
+            self.queue_draw()
+        return True
+
+    def _motion(self, w, ev):
+        self._set_hover(self._at(ev.x, ev.y))
+        return False
+
+    def _set_hover(self, d):
+        if d != self.hover:
+            self.hover = d
+            self.queue_draw()
+
+    def do_draw(self, cr):
+        from gi.repository import Pango, PangoCairo
+        from . import scheme
+        ink = scheme.ink()
+        W = self.get_allocated_width()
+        cw = W / 7.0
+        today = self.dt.date.today()
+        base = self.dt.date(2024, 1, 1) + self.dt.timedelta(days=week_start())      # 2024-01-01 is a Monday
+
+        def put(txt, cx, cy, size, col, bold=False):
+            lay = self.create_pango_layout(txt)
+            fd = Pango.FontDescription("Inter %s%d" % ("Bold " if bold else "", size))
+            lay.set_font_description(fd)
+            w, h = lay.get_pixel_size()
+            cr.move_to(cx - w / 2.0, cy - h / 2.0)
+            cr.set_source_rgba(*col)
+            PangoCairo.show_layout(cr, lay)
+
+        for i in range(7):
+            put((base + self.dt.timedelta(days=i)).strftime("%a")[:2], cw * (i + 0.5), self.HEAD / 2.0, 8, ink[:3] + (0.55,), True)
+        for n, d in enumerate(self._cells()):
+            cx, cy = cw * (n % 7 + 0.5), self.HEAD + self.ROW * (n // 7 + 0.5)
+            inm = (d.year, d.month) == (self.year, self.month)
+            rad = min(cw, self.ROW) / 2.0 - 2
+            col = ink[:3] + (0.95 if inm else 0.32,)
+            bold = False
+            if d == today:
+                g = cairo.LinearGradient(cx - rad, cy - rad, cx + rad, cy + rad)
+                g.add_color_stop_rgba(0, 1.0, 0.56, 0.82, 1); g.add_color_stop_rgba(1, 0.66, 0.55, 1.0, 1)
+                cr.arc(cx, cy, rad, 0, 6.2832); cr.set_source(g); cr.fill()
+                col, bold = (1, 1, 1, 1), True
+            elif d == self.hover:
+                cr.arc(cx, cy, rad, 0, 6.2832); cr.set_source_rgba(*(ink[:3] + (0.14,))); cr.fill()
+            if d == self.sel and d != today:
+                cr.arc(cx, cy, rad - 0.5, 0, 6.2832); cr.set_source_rgba(1.0, 0.56, 0.82, 0.95); cr.set_line_width(1.6); cr.stroke()
+            put(str(d.day), cx, cy, 10, col, bold)
+        return False
+
+
+class LevelBar(Gtk.DrawingArea):
+    """Slim rounded progress bar (battery level)."""
+
+    def __init__(self, frac=0.0, color=(0.66, 0.55, 1.0, 1), h=8):
+        super().__init__()
+        self.frac, self.color = frac, color
+        self.set_size_request(-1, h)
+        self.set_hexpand(True)
+
+    def set(self, frac, color=None):
+        self.frac = max(0.0, min(1.0, frac))
+        if color:
+            self.color = color
+        self.queue_draw()
+
+    def do_draw(self, cr):
+        from . import scheme
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        rr = h / 2.0
+        ink = scheme.ink()
+        rrect_path(cr, 0, 0, w, h, rr); cr.set_source_rgba(*(ink[:3] + (0.18,))); cr.fill()
+        if self.frac > 0:
+            rrect_path(cr, 0, 0, max(h, w * self.frac), h, rr); cr.set_source_rgba(*self.color); cr.fill()
+        return False
+
+
+def rrect_path(cr, x, y, w, h, r):
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -1.5708, 0); cr.arc(x + w - r, y + h - r, r, 0, 1.5708)
+    cr.arc(x + r, y + h - r, r, 1.5708, 3.1416); cr.arc(x + r, y + r, r, 3.1416, 4.7124)
+    cr.close_path()

@@ -50,7 +50,7 @@ class GlassMenu(Gtk.Window):
             p = Gtk.CssProvider(); p.load_from_data(MENU_CSS)
             Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_USER + 10 + 2)
             _installed = True
-        self.th = theme or appkit.theme()
+        self.th = appkit.theme()                           # always the current settings (a cached theme object kept the old transparency)
         self.comp = compositing()
         self.set_decorated(False); self.set_app_paintable(True)
         self.set_skip_taskbar_hint(True); self.set_skip_pager_hint(True)
@@ -198,22 +198,24 @@ class GlassMenu(Gtk.Window):
         m = self.th.material("window_light" if self.light else "window_dark")
         rim = (1, 1, 1, 0.55) if self.light else (1, 1, 1, 0.26)
         if self.comp:
-            gfx.comp_glass(cr, a.width, a.height, 14, m, 1.25)
+            gfx.comp_glass(cr, a.width, a.height, 14, m, 1.0)
             gfx.stroke_rrect(cr, 0, 0, a.width, a.height, 14, rim, 1.2)
         else:
-            tr, tg, tb = m["tint"]
+            tr, tg, tb = m["tint"]                           # no compositor: nothing to see through, so a solid surface
             cr.set_source_rgba(tr, tg, tb, 1) if not self.light else cr.set_source_rgba(tr * 0.97, tg * 0.97, tb * 0.97, 1)
             cr.paint()
             gfx.stroke_rrect(cr, 0, 0, a.width, a.height, 14, rim, 1.2)
         return False
 
-    def popup_at(self, x, y):
+    def popup_at(self, x, y, above=False):
         close_all(self)                                    # one menu / flyout at a time: opening this one closes the others
         if _popup_hook is not None:
             _popup_hook(self)
         _open.append(self)
         self.show_all()
         w, h = self.get_preferred_width()[1], self.get_preferred_height()[1]
+        if above:
+            y -= h                                        # opened from a bottom panel / dock: grow upward
         r = _monitor_rect(x, y)                               # the monitor the pointer is on (multi-monitor aware)
         self.move(int(max(r.x + 4, min(r.x + r.width - w - 4, x))), int(max(r.y + 4, min(r.y + r.height - h - 4, y))))
         self.present()

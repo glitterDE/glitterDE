@@ -27,6 +27,7 @@
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
@@ -41,6 +42,7 @@ typedef struct Win {
     Pixmap pix;
     cairo_surface_t *surf;
     int seen;                                                             /* scratch flag for resync_order() */
+    int fit, fit_valid, fit_sw, fit_sh, fx, fy, fw, fh;                   /* fit: shadow/rim hug the painted (non-transparent) part of a popup */
     int blur, shadow, radius, opaque, clip;                               /* opaque: 0 no, 1 solid dark backdrop, 2 solid light backdrop (fullscreen) */
     XRectangle *shape; int nshape; int shape_valid;
     cairo_surface_t *blur_surf; int blur_valid, bx, by, bw, bh;      /* cached blurred backdrop */
@@ -62,7 +64,7 @@ static int dirty = 1, running = 1;
 static long n_blur, n_restack, n_damage;          /* statistics (GLITTERDE_COMP_STATS=1) */
 static int dx1 = 0, dy1 = 0, dx2 = 0, dy2 = 0;   /* dirty rectangle (screen coords), empty when dx2<=dx1 */
 #define PAD 64
-static Atom a_blur, a_shadow, a_radius, a_body, a_opaque, a_blur_h, a_rim, a_clip;
+static Atom a_blur, a_shadow, a_radius, a_body, a_opaque, a_blur_h, a_rim, a_clip, a_fit;
 static double now_ms(void);
 
 static int on_error(Display *d, XErrorEvent *e) { (void)d; (void)e; return 0; }
@@ -118,6 +120,8 @@ static void props(Win *w) {
     w->blur_h = (int)get_card(w->id, a_blur_h, 0);
     w->rim = (int)get_card(w->id, a_rim, 0);
     w->clip = (int)get_card(w->id, a_clip, 0);
+    w->fit = (int)get_card(w->id, a_fit, 0);
+    w->fit_valid = 0;
 }
 
 static void drop_pix(Win *w) {
@@ -267,28 +271,52 @@ static void shape_path(cairo_t *c, Win *w) {
     else cairo_rectangle(c, w->x, w->y, w->w, w->h);
 }
 
-static void draw_shadow(cairo_t *c, Win *w) {
+/* The part of a window that is really painted. A popup of another toolkit (Firefox / GTK menus) often sits in a transparent margin
+   where it draws its own faint shadow; shadowing the whole window rectangle left a visible gap between the menu and our shadow. */
+static void vis_rect(Win *w, cairo_surface_t *s, int *x, int *y, int *vw, int *vh) {
+    *x = w->x; *y = w->y; *vw = w->w; *vh = w->h;
+    if (!w->fit || w->depth != 32 || !s) return;
+    if (!w->fit_valid || w->fit_sw != w->w || w->fit_sh != w->h) {
+        cairo_surface_t *im = cairo_surface_map_to_image(s, NULL);
+        if (!im || cairo_image_surface_get_format(im) != CAIRO_FORMAT_ARGB32) { if (im) cairo_surface_unmap_image(s, im); return; }
+        int iw = cairo_image_surface_get_width(im), ih = cairo_image_surface_get_height(im), st = cairo_image_surface_get_stride(im);
+        unsigned char *d = cairo_image_surface_get_data(im);
+        int x1 = iw, y1 = ih, x2 = -1, y2 = -1;
+        for (int j = 0; j < ih; j++) {
+            uint32_t *row = (uint32_t *)(d + (size_t)j * st);
+            for (int i = 0; i < iw; i++)
+                if ((row[i] >> 24) >= 200) { if (i < x1) x1 = i; if (i > x2) x2 = i; if (j < y1) y1 = j; if (j > y2) y2 = j; }
+        }
+        cairo_surface_unmap_image(s, im);
+        if (x2 < x1 || y2 < y1) return;                          /* nothing painted yet: try again next frame */
+        w->fx = x1; w->fy = y1; w->fw = x2 - x1 + 1; w->fh = y2 - y1 + 1;
+        w->fit_valid = 1; w->fit_sw = w->w; w->fit_sh = w->h;
+    }
+    *x = w->x + w->fx; *y = w->y + w->fy; *vw = w->fw; *vh = w->fh;
+}
+
+static void draw_shadow(cairo_t *c, Win *w, int vx, int vy, int vw, int vh) {
     const double blur = 26, dy = 10, alpha = 0.34;
     double r = w->radius > 0 ? w->radius : 6;
-    if (!w->shadow_surf || w->sh_w != w->w || w->sh_h != w->h || w->sh_r != (int)r) {
+    if (!w->shadow_surf || w->sh_w != vw || w->sh_h != vh || w->sh_r != (int)r) {
         if (w->shadow_surf) cairo_surface_destroy(w->shadow_surf);
-        w->shadow_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w->w + 2 * PAD, w->h + 2 * PAD);
+        w->shadow_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, vw + 2 * PAD, vh + 2 * PAD);
         cairo_t *s = cairo_create(w->shadow_surf);
         for (int i = 0; i < 14; i++) {
             double g = blur * (1 - i / 14.0);
-            rrect(s, PAD - g, PAD - g + dy, w->w + 2 * g, w->h + 2 * g, r + g);
+            rrect(s, PAD - g, PAD - g + dy, vw + 2 * g, vh + 2 * g, r + g);
             cairo_set_source_rgba(s, 0.08, 0.03, 0.30, alpha / 14 * 1.9);
             cairo_fill(s);
         }
         cairo_destroy(s);
-        w->sh_w = w->w; w->sh_h = w->h; w->sh_r = (int)r;
+        w->sh_w = vw; w->sh_h = vh; w->sh_r = (int)r;
     }
     cairo_save(c);
-    cairo_rectangle(c, w->x - PAD, w->y - PAD, w->w + 2 * PAD, w->h + 2 * PAD);
-    rrect(c, w->x, w->y, w->w, w->h, r);
+    cairo_rectangle(c, vx - PAD, vy - PAD, vw + 2 * PAD, vh + 2 * PAD);
+    rrect(c, vx, vy, vw, vh, r);
     cairo_set_fill_rule(c, CAIRO_FILL_RULE_EVEN_ODD);
     cairo_clip(c);                                  /* never darken the window body itself */
-    cairo_set_source_surface(c, w->shadow_surf, w->x - PAD, w->y - PAD);
+    cairo_set_source_surface(c, w->shadow_surf, vx - PAD, vy - PAD);
     cairo_paint(c);
     cairo_restore(c);
 }
@@ -466,19 +494,22 @@ static void paint(void) {
         if (!s) continue;
         if (w->opaque) {                                             /* fullscreen: nothing below (panel, widgets, wallpaper) may show through the app's glass */
             cairo_save(c);
-            cairo_rectangle(c, w->x, w->y, w->w, w->h);
+            if (w->radius > 0 && w->nshape <= 1) rrect(c, w->x, w->y, w->w, w->h, w->radius); else cairo_rectangle(c, w->x, w->y, w->w, w->h);
             if (w->opaque == 2) cairo_set_source_rgb(c, 0.94, 0.93, 0.98); else cairo_set_source_rgb(c, 0.09, 0.075, 0.16);
             cairo_fill(c);
             cairo_restore(c);
         }
-        if (w->shadow) draw_shadow(c, w);
+        int vx = w->x, vy = w->y, vw = w->w, vh = w->h;
+        if (held) { if (w->old_w < vw) vw = w->old_w; if (w->old_h < vh) vh = w->old_h; }   /* resize hold: no shadow around the part not painted yet */
+        else vis_rect(w, s, &vx, &vy, &vw, &vh);
+        if (w->shadow) draw_shadow(c, w, vx, vy, vw, vh);
         if (w->blur) {
             if (!w->blur_valid) blur_compute(w);
             blur_paint(c, w);
         }
         cairo_save(c);
         if (w->nshape > 1 || !w->shape_valid) { shape_path(c, w); cairo_clip(c); }
-        if ((w->rim || w->clip) && w->radius > 0 && w->nshape <= 1) { rrect(c, w->x, w->y, w->w, w->h, w->radius); cairo_clip(c); }
+        if ((w->rim || w->clip) && w->radius > 0 && w->nshape <= 1) { rrect(c, vx, vy, vw, vh, w->radius); cairo_clip(c); }
         cairo_set_source_surface(c, s, w->x, w->y);
         if (held) {                                                  /* never paint outside the part the old picture covers */
             cairo_new_path(c);
@@ -489,7 +520,7 @@ static void paint(void) {
         cairo_restore(c);
         if (w->rim == 2 && w->radius > 0) {                           /* frameless window: the same 1 px edge, all the way round */
             cairo_save(c);
-            rrect(c, w->x + 0.5, w->y + 0.5, w->w - 1, w->h - 1, w->radius - 0.5);
+            rrect(c, vx + 0.5, vy + 0.5, vw - 1, vh - 1, w->radius - 0.5);
             cairo_set_source_rgba(c, 1, 1, 1, 0.22); cairo_set_line_width(c, 1.0); cairo_stroke(c);
             cairo_restore(c);
         } else if (w->rim == 1 && w->radius > 0 && w->h > w->body_y) {            /* same 1 px edge as the titlebar and glass bodies: sides + bottom of the body */
@@ -632,6 +663,7 @@ int main(int argc, char **argv) {
     a_shadow = XInternAtom(dpy, "_GLITTER_SHADOW", False);
     a_radius = XInternAtom(dpy, "_GLITTER_RADIUS", False);
     a_clip = XInternAtom(dpy, "_GLITTER_CLIP", False);
+    a_fit = XInternAtom(dpy, "_GLITTER_FIT", False);
     a_body = XInternAtom(dpy, "_GLITTER_BODY_Y", False);
     a_blur_h = XInternAtom(dpy, "_GLITTER_BLUR_H", False);
     a_rim = XInternAtom(dpy, "_GLITTER_RIM", False);

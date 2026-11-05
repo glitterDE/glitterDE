@@ -17,6 +17,9 @@ echo "=== glitterDE session $(date) pid $$ ==="
 BIN="$(dirname "$(readlink -f "$0")")"
 export PATH="$BIN:$PATH"
 export XDG_CURRENT_DESKTOP=glitterDE XDG_SESSION_DESKTOP=glitterde XDG_SESSION_TYPE=x11 GDK_BACKEND=x11
+# the user's chosen cursor theme / size (not just a default) in the environment of EVERYTHING this session starts
+PYTHONPATH="$BIN/..${PYTHONPATH:+:$PYTHONPATH}"; export PYTHONPATH
+eval "$(python3 -m glitterde.desktopenv --env 2>/dev/null)"
 : "${XCURSOR_THEME:=glitterde}"; export XCURSOR_THEME
 
 # the session needs a D-Bus session bus (notifications, MPRIS, portals); most logins already provide one
@@ -25,6 +28,10 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 
     exec dbus-run-session -- "$0" "$@"
 fi
 echo "DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY DBUS=$DBUS_SESSION_BUS_ADDRESS"
+# ... and in the files / X resources / GSettings / D-Bus activation environment that apps which ignore the environment read
+python3 -m glitterde.desktopenv --apply 2>&1 | sed 's/^/desktopenv: /'
+# the display layout chosen in Settings > Display (resolution, refresh rate, rotation, arrangement), before anything reads the screen size
+python3 -m glitterde.displays --apply 2>&1 | sed 's/^/displays: /'
 echo "python: $(python3 --version 2>&1)  user: $(id -un)  host: $(hostname 2>/dev/null)"
 
 # ---- logs: ~/.local/state/glitterde/{session,comp,wm,shell}.log (the previous session's logs are kept as *.log.old)

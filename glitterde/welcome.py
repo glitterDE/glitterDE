@@ -16,7 +16,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
-from . import config, gfx, tokens  # noqa: E402
+from . import appkit, config, gfx, tokens  # noqa: E402
 from . import settings_model as prefs  # noqa: E402
 from .widgets import Ico  # noqa: E402
 
@@ -336,6 +336,7 @@ class Welcome(Gtk.Window):
     def _choose_picture(self, *_):
         d = Gtk.FileChooserDialog(title="Choose a wallpaper", parent=self, action=Gtk.FileChooserAction.OPEN)
         d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Choose", Gtk.ResponseType.OK)
+        appkit.style_stock_dialog(d)
         f = Gtk.FileFilter(); f.set_name("Pictures"); f.add_mime_type("image/png"); f.add_mime_type("image/jpeg"); f.add_mime_type("image/webp"); d.add_filter(f)
         d.set_current_folder(os.path.expanduser("~/Pictures") if os.path.isdir(os.path.expanduser("~/Pictures")) else os.path.expanduser("~"))
         if d.run() == Gtk.ResponseType.OK:

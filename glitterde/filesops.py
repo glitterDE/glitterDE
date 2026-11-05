@@ -217,13 +217,43 @@ class FileOps:
         src = [Gtk.TargetEntry.new("text/uri-list", 0, 0), Gtk.TargetEntry.new("text/plain", 0, 1)]
         dst = [Gtk.TargetEntry.new("text/uri-list", 0, 0)]
         self.tree.enable_model_drag_source(Gdk.ModifierType.BUTTON1_MASK, src, acts)
-        self.flow.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, src, acts)
+        # Icon view: GtkFlowBox collapses the selection to the pressed icon on press, and the stock drag source then only ever saw one file (or
+        # never started). So the drag is started here, by hand, after the pointer has moved past the drag threshold.
+        self._dnd_targets, self._dnd_actions = Gtk.TargetList.new(src), acts
+        self._drag_pending = None
+        # (which widget owns the pointer grab after a press depends on GTK's event windows, so listen on every level the icons sit in)
+        for wd in (self.flow, self._bg, self._sw_icons, self):
+            wd.add_events(Gdk.EventMask.BUTTON1_MOTION_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK)
+            wd.connect("motion-notify-event", self._flow_motion)
         for w in (self.tree, self.flow):
             w.connect("drag-begin", self._dnd_begin)
             w.connect("drag-data-get", self._dnd_get)
         for w, kind in ((self._sw_list, "list"), (self._sw_icons, "icons"), (self.places, "places")):
             w.drag_dest_set(Gtk.DestDefaults.ALL, dst, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
             w.connect("drag-data-received", self._dnd_received, kind)
+
+    def _flow_motion(self, w, ev):
+        return False
+
+    def _drag_poll(self):
+        """After a press on an icon: watch the pointer (GTK stops delivering motion events to us once the press has been claimed) and start the
+        drag as soon as it has moved past the drag threshold with the button still down."""
+        pend = self._drag_pending
+        if pend is None:
+            return False
+        dev = Gdk.Display.get_default().get_default_seat().get_pointer()
+        _w, x, y, mask = Gdk.Screen.get_default().get_root_window().get_device_position(dev)
+        if not mask & Gdk.ModifierType.BUTTON1_MASK:
+            self._drag_pending = None
+            return False
+        if not self.flow.drag_check_threshold(0, 0, int(x - pend[0]), int(y - pend[1])):
+            return True
+        self._drag_pending = None
+        self._keep_sel = None                           # a real drag: the selection stays exactly as it is
+        ctx = self.flow.drag_begin_with_coordinates(self._dnd_targets, self._dnd_actions, 1, pend[2], -1, -1)     # the press event itself starts it, like GTK would
+        if ctx is None:
+            self._keep_sel = None
+        return False
 
     def _dnd_files(self):
         sel = self.selected()
@@ -233,6 +263,8 @@ class FileOps:
         return [f for _i, f in sel]
 
     def _dnd_begin(self, w, ctx):
+        self._tkeep = None
+        self._keep_sel = None                      # it is a real drag: the multiple selection stays as it is (see _flow_click)
         files = self._dnd_files()
         if files:
             try:
@@ -279,6 +311,12 @@ class FileOps:
     def _dnd_received(self, w, ctx, x, y, sel, info, time_, kind):
         uris = sel.get_uris() or []
         dest = self._dnd_target(kind, x, y)
+        if dest is not None:                       # dropping files into the folder they already live in does nothing (no "name (copy)")
+            uris = [u for u in uris if not (Gio.File.new_for_uri(u).get_parent() is not None and Gio.File.new_for_uri(u).get_parent().equal(dest))]
+            if not uris:
+                self._say("Already in this folder")
+                Gtk.drag_finish(ctx, False, False, time_)
+                return
         ok = bool(uris and dest is not None)
         if ok:
             op = "copy" if ctx.get_selected_action() == Gdk.DragAction.COPY else "cut"
@@ -645,7 +683,9 @@ class FileOps:
             kids.append(("item", "Other application…", lambda: self.open_with_other(files)))
             items.append(("sub", "grid", "Open With", kids))
         if is_dir:
-            items += [("itemi", "plus", "Open in New Tab", lambda: self.new_tab(files[0])),
+            pinned = self.is_pinned(files[0])
+            items += [("itemi", "pin", "Unpin from Sidebar" if pinned else "Pin to Sidebar", lambda: self.toggle_pin(files[0])),
+                      ("itemi", "plus", "Open in New Tab", lambda: self.new_tab(files[0])),
                       ("itemi", "windows", "Open in New Window", lambda: self.open_new_window(files[0])),
                       ("itemi", "terminal", "Open Terminal Here", lambda: self.open_terminal(files[0]))]
         items.append(("sep",))
@@ -689,6 +729,7 @@ class FileOps:
                                            ("check", "List", self.view == "list", lambda: self.view != "list" and self.toggle_view())]),
                  ("check", "Show hidden files", self.hidden, self.toggle_hidden), ("sep",),
                  ("itemi", "terminal", "Open Terminal Here", lambda: self.open_terminal(self.cwd)),
+                 ("itemi", "pin", "Unpin from Sidebar" if self.is_pinned(self.cwd) else "Pin Folder to Sidebar", lambda: self.toggle_pin(self.cwd)),
                  ("itemi", None, "Copy Folder Path", lambda: self.copy_path([self.cwd])),
                  ("itemi", "gear", "Properties", lambda: self.properties([self.cwd]), True, "Alt+Enter"),
                  ("itemi", None, "Refresh", self.refresh, True, "F5")]
@@ -707,6 +748,8 @@ class FileOps:
         if f.get_path():
             items += [("itemi", "terminal", "Open Terminal Here", lambda: self.open_terminal(f)),
                       ("itemi", None, "Copy Path", lambda: self.copy_path([f]))]
+        if getattr(row, "pin", False):
+            items += [("sep",), ("itemi", "pin", "Unpin from Sidebar", lambda: self.toggle_pin(f))]
         if uri.startswith("trash:"):
             items += [("sep",), ("itemi", "trash", "Empty Trash", self.empty_trash)]
         return self._show_menu(ev, items)

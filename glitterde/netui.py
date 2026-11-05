@@ -476,6 +476,61 @@ class WifiModel:
 
 
 # ============================================================== Wi-Fi views
+
+def refit(widget, delay=170):
+    """A top-level window grows with its content but is not always told to when a Revealer inside it animates open: ask for the natural size
+    again once the animation has run, keeping the width (and, for a popup that hangs from the bottom, the bottom edge)."""
+    def go():
+        top = widget.get_toplevel()
+        if top is None or not isinstance(top, Gtk.Window) or not top.get_visible():
+            return False
+        gw = top.get_window()
+        w = max(1, top.get_allocated_width())
+        before = None
+        if gw is not None:
+            before = (top.get_position(), top.get_allocated_height())
+        top.resize(w, 1)
+
+        def settle():
+            if gw is not None and before is not None and top.get_visible():
+                (x, y), h0 = before
+                h1 = top.get_allocated_height()
+                scr = Gdk.Screen.get_default()
+                if y > scr.get_height() / 2:                       # anchored to the bottom: keep the bottom edge where it was
+                    top.move(x, y + h0 - h1)
+                else:                                              # otherwise never run off the bottom of the screen
+                    top.move(x, max(4, min(y, scr.get_height() - h1 - 4)))
+            return False
+        GLib.timeout_add(60, settle)
+        return False
+    GLib.timeout_add(delay, go)
+
+
+def row_opened(lst, row):
+    """A row in a popup list opened or closed. The list sits in a scroller capped at ~250px, so the opened options used to appear
+    \"not to expand\" (they were clipped below the cap). Raise the cap while any row is open, scroll the row fully into view and make the
+    flyout window itself grow (or shrink back) to fit."""
+    sc = lst.get_ancestor(Gtk.ScrolledWindow)
+    if sc is None:
+        return
+    base = getattr(sc, "_glitter_base", None)
+    if base is None:
+        base = sc._glitter_base = sc.get_max_content_height()
+    any_open = any(r.rev.get_reveal_child() for r in lst.rows.values())
+    sc.set_max_content_height(base + 260 if any_open else base)
+    sc.queue_resize()
+
+    def reveal():
+        if row.get_parent() is None or not row.rev.get_reveal_child():
+            return False
+        pt = row.translate_coordinates(lst, 0, 0)
+        if pt:
+            sc.get_vadjustment().clamp_page(pt[1], pt[1] + row.get_allocated_height())
+        return False
+    GLib.timeout_add(180, reveal)
+    refit(sc)
+
+
 class NetRow(Gtk.Box):
     """One Wi-Fi network: click to join, the arrow opens the options (password, auto-connect, disconnect, forget). Updated in place so an
     open password box or a half-typed password survives the periodic refresh."""
@@ -543,6 +598,7 @@ class NetRow(Gtk.Box):
             self.pw_wanted = False
             self.pw_box.hide()
         self._fill_info()
+        row_opened(self.view, self)
 
     def _clicked(self, *_):
         ap = self.ap
@@ -822,6 +878,48 @@ class WifiPanel(Gtk.Box):
         self.list.refresh()
 
 
+class VpnPanel(Gtk.Box):
+    """The VPN quick-settings popup body: every VPN / WireGuard profile with its state, a switch, and which one is carrying the traffic."""
+
+    def __init__(self, model, host):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.model, self.host = model, host
+        head = Gtk.Box(spacing=8)
+        self.ico = Ico("shield", 16, ink(), 1.5)
+        head.pack_start(self.ico, False, False, 0)
+        head.pack_start(label("VPN", "big"), True, True, 0)
+        self.pack_start(head, False, False, 2)
+        self.status = label("", "muted")
+        self.pack_start(self.status, False, False, 0)
+        self.rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.pack_start(self.rows, False, False, 0)
+        self.link_rows = {}
+        self.pack_start(button("Network settings…", lambda: host.open_settings("Network")), False, False, 2)
+        self.connect("map", lambda *_: (self.model.add_listener(self.refresh), self.model.start(), self.refresh()))
+        self.connect("unmap", lambda *_: (self.model.remove_listener(self.refresh), self.model.stop()))
+        self.show_all()
+
+    def refresh(self):
+        m = self.model
+        vpns = m.vpns()
+        on = [v for v in vpns if v["uuid"] in m.active]
+        self.ico.set_icon("shield", ink(0.95 if on else 0.55))
+        self.status.set_text(("Connected to " + (on[0]["name"] if len(on) == 1 else "%d VPNs" % len(on))) if on else
+                             ("Not connected" if vpns else "No VPN profiles yet. Add one in Network settings."))
+        for k in [k for k in self.link_rows if k not in {v["uuid"] for v in vpns}]:
+            self.rows.remove(self.link_rows.pop(k))
+        for v in vpns:
+            row = self.link_rows.get(v["uuid"])
+            if row is None:
+                row = self.link_rows[v["uuid"]] = LinkRow(m, "shield", "")
+                self.rows.pack_start(row, False, False, 0)
+            up = v["uuid"] in m.active
+            kind = "WireGuard" if v["type"] == "wireguard" else "VPN"
+            row.set(v["name"], kind + " · " + ("Connected" if up else "Off"), "Turn off" if up else "Turn on", lambda v_=v: m.toggle_vpn(v_), m.conn_busy == v["uuid"])
+            row.ico.set_icon("shield", ink(0.95 if up else 0.5))
+        self.rows.show_all()
+
+
 # ============================================================== Bluetooth views
 BT_ICONS = {"audio-headset": "volume", "audio-headphones": "volume", "audio-card": "volume", "input-keyboard": "cursor", "input-mouse": "cursor",
             "input-gaming": "cursor", "input-tablet": "cursor", "phone": "phone", "computer": "laptop", "video-display": "monitor",
@@ -932,6 +1030,7 @@ class BtRow(Gtk.Box):
         self.arrow.set_icon("chev_up" if want else "chev_down")
         if want:
             self.rename.set_text(self.dev.title)
+        row_opened(self.view, self)
 
     def _rename(self):
         t = self.rename.get_text().strip()

@@ -12,7 +12,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import aboutpage, appkit, config, gfx, iconpicker, netpages, services, settings_model as model, themeeditor, tokens
+from . import aboutpage, appkit, config, desktopenv, displays, gfx, iconpicker, netpages, services, settings_model as model, themeeditor, tokens
 from . import icons as ic
 from .widgets import Ico, label, search_overlay
 from .menus import ChoiceButton
@@ -20,7 +20,7 @@ from .menus import ChoiceButton
 from .scheme import ink
 PINK = (0.97, 0.47, 0.78, 1)
 # Pages with nothing to configure yet: hidden until About > "Show experimental settings" is on.
-EXPERIMENTAL_PAGES = {"Display"}
+EXPERIMENTAL_PAGES = set()
 ACCENTS = [("Lavender", "#9b7df0"), ("Pink", "#f777c8"), ("Sky", "#6fb4ff"), ("Mint", "#4fd1a5"), ("Peach", "#ff9e7a")]
 
 
@@ -86,17 +86,17 @@ class Settings(appkit.GlassWindow):
         root.pack_start(wrap, True, True, 0)
 
         self._groups, self._collapsed, self._built, self._all_builders = {}, set(), set(), {}
-        tree = [("Appearance", "palette", [("Theme", self.p_theme), ("Colours", self.p_colours), ("Cursor", self.p_cursor),
-                                           ("Icons", self.p_icons), ("Fonts", self.p_fonts),
-                                           ("Transparency", lambda: self.model_page("Transparency"))]),
+        # Grouped by what the person is trying to change: how it looks, what the desktop shows, how the shell and windows behave, the
+        # connections, the hardware, and the system itself.  (Page names are also used by "Settings..." menu items in the shell.)
+        tree = [("Appearance", "palette", [("Theme", self.p_theme), ("Colours", self.p_colours), ("Transparency", lambda: self.model_page("Transparency")),
+                                           ("Fonts", self.p_fonts), ("Icons", self.p_icons), ("Cursor", self.p_cursor)]),
                 ("Desktop", "monitor", [("Wallpaper", self.p_wall), ("Desktop icons", lambda: self.model_page("Desktop icons")),
-                                        ("Widgets", self.p_widgets)]),
-                ("Layout", "windows", [("Panel", lambda: self.model_page("Panel")), ("Dock", self.p_dock),
-                                       ("Launcher", self.p_launcher),
-                                       ("Windows", lambda: self.model_page("Windows")),
-                                       ("Notifications", lambda: self.model_page("Notifications"))]),
-                ("Devices", "laptop", [("Network", self.p_network), ("Bluetooth", self.p_bluetooth), ("Audio", self.p_audio),
-                                       ("Display", self.p_display), ("Drives", lambda: self.model_page("Drives")), ("Power", self.p_power)]),
+                                        ("Widgets", self.p_widgets), ("Windows", lambda: self.model_page("Windows"))]),
+                ("Shell", "panel_left", [("Panel", lambda: self.model_page("Panel")), ("Dock", self.p_dock), ("Launcher", self.p_launcher),
+                                         ("Notifications", lambda: self.model_page("Notifications"))]),
+                ("Connections", "wifi", [("Network", self.p_network), ("Bluetooth", self.p_bluetooth)]),
+                ("Hardware", "laptop", [("Display", self.p_display), ("Audio", self.p_audio), ("Power", self.p_power),
+                                        ("Drives", lambda: self.model_page("Drives"))]),
                 ("System", "settings_gear_outline", [("About", self.p_about)])]
         for g, icn, kids in tree:
             gr = Gtk.ListBoxRow(); gr.group = g; gr.set_selectable(False)
@@ -514,14 +514,9 @@ class Settings(appkit.GlassWindow):
         theme = theme or d.get("theme") or "default"
         size = size or int(d.get("size", 32))
         config.set("cursor", "theme", theme); config.set("cursor", "size", size)
-        gtk_ini_set("gtk-cursor-theme-name", theme); gtk_ini_set("gtk-cursor-theme-size", size)
-        idx = os.path.expanduser("~/.icons/default"); os.makedirs(idx, exist_ok=True)
-        with open(os.path.join(idx, "index.theme"), "w") as f:
-            f.write("[Icon Theme]\nName=Default\nInherits=%s\n" % theme)
         s = Gtk.Settings.get_default(); s.set_property("gtk-cursor-theme-name", theme); s.set_property("gtk-cursor-theme-size", size)
-        import subprocess, shutil
-        if shutil.which("xrdb"):
-            subprocess.run(["xrdb", "-merge"], input=("Xcursor.theme: %s\nXcursor.size: %d\n" % (theme, size)).encode(), timeout=3)
+        import threading
+        threading.Thread(target=desktopenv.apply_cursor, args=(theme, size), daemon=True).start()   # files, X resources, gsettings, D-Bus env
 
     def p_icons(self):
         p = self.page_box(); c = self.card("Icon theme")
@@ -715,13 +710,261 @@ class Settings(appkit.GlassWindow):
         return p
 
     def p_display(self):
-        p = self.page_box(); c = self.card("Displays")
-        d = Gdk.Display.get_default()
-        for i in range(d.get_n_monitors()):
-            m = d.get_monitor(i); g = m.get_geometry()
-            c.inner.pack_start(self.row("%s%s" % (m.get_model() or "Display %d" % (i + 1), "  (primary)" if m.is_primary() else ""),
-                                        label("%d × %d  @ x%d" % (g.width, g.height, m.get_scale_factor()), "muted")), False, False, 2)
-        p.pack_start(c, False, False, 0)
+        """Resolution, refresh rate, rotation, position, primary display and on/off for every connected screen (xrandr).
+        Changes are applied together with Apply; a countdown reverts them unless they are confirmed (a black screen must never stick)."""
+        p = self.page_box()
+        if not displays.available():
+            c = self.card("Displays")
+            c.inner.pack_start(self.note("Display settings need xrandr (package x11-xserver-utils, or xorg-xrandr on Arch)."), False, False, 0)
+            p.pack_start(c, False, False, 0)
+            return p
+        st = {"outs": displays.query(), "orig": None, "work": None, "timer": None}
+        st["orig"] = displays.layout_of(st["outs"])
+        st["work"] = {k: dict(v) for k, v in st["orig"].items()}
+        holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        p.pack_start(holder, False, False, 0)
+        bar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        p.pack_start(bar_box, False, False, 0)
+        msg = self.note("")
+        msg.set_no_show_all(True)
+        p.pack_start(msg, False, False, 0)
+
+        def say(text):
+            msg.set_text(text or ""); msg.set_visible(bool(text))
+
+        def dirty():
+            return st["work"] != st["orig"]
+
+        class Preview(Gtk.DrawingArea):
+            def __init__(self):
+                super().__init__()
+                self.set_size_request(-1, 150)
+
+            def do_draw(self, cr):
+                from .scheme import ink as _ink
+                lay, outs = st["work"], {o.name: o for o in st["outs"]}
+                on = [(n, s_) for n, s_ in lay.items() if s_.get("on")]
+                W, H = self.get_allocated_width(), self.get_allocated_height()
+                if not on:
+                    return False
+                rects = []
+                for n, s_ in on:
+                    w, h = displays._size(outs[n], s_["mode"], s_["rotation"])
+                    rects.append((n, s_["x"], s_["y"], w, h))
+                minx, miny = min(r[1] for r in rects), min(r[2] for r in rects)
+                maxx, maxy = max(r[1] + r[3] for r in rects), max(r[2] + r[4] for r in rects)
+                k = min((W - 24) / max(1.0, maxx - minx), (H - 24) / max(1.0, maxy - miny))
+                ox, oy = (W - (maxx - minx) * k) / 2, (H - (maxy - miny) * k) / 2
+                ink_ = _ink()
+                for n, x, y, w, h in rects:
+                    rx, ry, rw, rh = ox + (x - minx) * k + 1.5, oy + (y - miny) * k + 1.5, w * k - 3, h * k - 3
+                    gfx.rrect(cr, rx, ry, rw, rh, 8)
+                    cr.set_source_rgba(0.66, 0.55, 1.0, 0.30 if not lay[n].get("primary") else 0.55); cr.fill_preserve()
+                    cr.set_source_rgba(*ink_[:3], 0.55); cr.set_line_width(1.2); cr.stroke()
+                    gfx.text(cr, n + ("  ★" if lay[n].get("primary") else ""), rx + rw / 2, ry + rh / 2, 11, ink_, 600, "c")
+                return False
+
+        prev = Preview()
+
+        def rebuild():
+            for ch in holder.get_children():
+                holder.remove(ch); ch.destroy()
+            lay, outs = st["work"], st["outs"]
+            if not outs:
+                c = self.card("Displays")
+                c.inner.pack_start(self.note("No connected displays were found."), False, False, 0)
+                holder.pack_start(c, False, False, 0); holder.show_all(); return
+            pc = self.card("Arrangement")
+            pc.inner.pack_start(prev, False, False, 0)
+            pc.inner.pack_start(self.note("Pick a position for each screen below. The star marks the main display (panel, dock and new windows go there)."),
+                                False, False, 0)
+            holder.pack_start(pc, False, False, 0)
+            for o in outs:
+                s_ = lay[o.name]
+                c = self.card("%s%s" % (o.name, ("  ·  " + o.model) if o.model else ""))
+                if len(outs) > 1:
+                    c.inner.pack_start(self.row("Use this display", self.switch(bool(s_["on"]), lambda v, n=o.name: toggle(n, v))), False, False, 2)
+                if s_["on"]:
+                    res = ChoiceButton(light=True, theme=self.th)
+                    for m in o.modes:
+                        res.append(m.key, m.label() + ("  (recommended)" if m.preferred is not None else ""))
+                    res.set_active_id(s_["mode"] or "")
+                    res.connect("changed", lambda w, n=o.name: set_mode(n, w.get_active_id()))
+                    c.inner.pack_start(self.row("Resolution", res), False, False, 2)
+                    cm = o.mode(s_["mode"])
+                    if cm and len(cm.rates) > 1:
+                        rt = ChoiceButton(light=True, theme=self.th)
+                        for r in cm.rates:
+                            rt.append("%g" % r, "%g Hz" % round(r, 2))
+                        rt.set_active_id("%g" % (s_["rate"] or cm.rates[0]))
+                        rt.connect("changed", lambda w, n=o.name: set_rate(n, float(w.get_active_id())))
+                        c.inner.pack_start(self.row("Refresh rate", rt), False, False, 2)
+                    rot = ChoiceButton(light=True, theme=self.th)
+                    for k_, lab in displays.ROTATIONS:
+                        rot.append(k_, lab)
+                    rot.set_active_id(s_["rotation"])
+                    rot.connect("changed", lambda w, n=o.name: set_rot(n, w.get_active_id()))
+                    c.inner.pack_start(self.row("Orientation", rot), False, False, 2)
+                    others = [x for x in outs if x.name != o.name and lay[x.name]["on"]]
+                    if others:
+                        pos = ChoiceButton(light=True, theme=self.th)
+                        for x in others:
+                            for k_, lab in displays.POSITIONS:
+                                pos.append("%s|%s" % (k_, x.name), "%s %s" % (lab, x.name))
+                        pos.append("keep", "Keep current position")
+                        pos.set_active_id("keep")
+                        pos.connect("changed", lambda w, n=o.name: set_pos(n, w.get_active_id()))
+                        c.inner.pack_start(self.row("Position", pos), False, False, 2)
+                    if len(outs) > 1:
+                        mb = Gtk.Button(label="Main display" if s_.get("primary") else "Make main display")
+                        mb.get_style_context().add_class("clear"); mb.set_sensitive(not s_.get("primary"))
+                        mb.connect("clicked", lambda *_, n=o.name: make_primary(n))
+                        c.inner.pack_start(self.row("Main display", mb), False, False, 2)
+                holder.pack_start(c, False, False, 0)
+            holder.show_all()
+            refresh_bar()
+
+        def toggle(n, v):
+            if not v and sum(1 for s_ in st["work"].values() if s_["on"]) <= 1:
+                say("At least one display must stay on."); GLib.idle_add(rebuild); return
+            o = next(x for x in st["outs"] if x.name == n)
+            s_ = st["work"][n]
+            s_["on"] = bool(v)
+            if v and not s_["mode"]:
+                m, r = o.preferred()
+                s_["mode"], s_["rate"] = (m.key, r) if m else (None, None)
+            if not v and s_.get("primary"):
+                displays.set_primary(st["work"], next(k for k, x in st["work"].items() if x["on"]))
+            if v:                                                   # a screen that was off goes to the right of the others
+                right = max((st["work"][k]["x"] + displays._size(next(x for x in st["outs"] if x.name == k), st["work"][k]["mode"], st["work"][k]["rotation"])[0]
+                             for k in st["work"] if k != n and st["work"][k]["on"]), default=0)
+                s_["x"], s_["y"] = right, 0
+            GLib.idle_add(rebuild)
+
+        def set_mode(n, key):
+            o = next(x for x in st["outs"] if x.name == n)
+            m = o.mode(key)
+            if m is None or st["work"][n]["mode"] == key:
+                return
+            st["work"][n]["mode"] = key
+            st["work"][n]["rate"] = m.rates[0]
+            reflow(n)
+
+        def set_rate(n, r):
+            st["work"][n]["rate"] = r
+            refresh_bar()
+
+        def set_rot(n, rot):
+            if st["work"][n]["rotation"] != rot:
+                st["work"][n]["rotation"] = rot
+                reflow(n)
+
+        def reflow(n):
+            """A size change moves the neighbours: keep each screen's side, re-pack so nothing overlaps and nothing leaves a gap."""
+            lay, outs = st["work"], {o.name: o for o in st["outs"]}
+            order = sorted([k for k, s_ in lay.items() if s_["on"]], key=lambda k: (lay[k]["x"], lay[k]["y"]))
+            x = 0
+            for k in order:
+                w, h = displays._size(outs[k], lay[k]["mode"], lay[k]["rotation"])
+                lay[k]["x"] = x
+                x += w
+            for k in order:
+                lay[k]["y"] = 0
+            GLib.idle_add(rebuild)
+
+        def set_pos(n, val):
+            if val == "keep":
+                return
+            rel, other = val.split("|", 1)
+            displays.place(st["work"], st["outs"], n, rel, other)
+            GLib.idle_add(rebuild)
+
+        def make_primary(n):
+            displays.set_primary(st["work"], n)
+            GLib.idle_add(rebuild)
+
+        # ---- Apply / Reset, with a revert countdown
+        btn_row = Gtk.Box(spacing=8)
+        apply_b = Gtk.Button(label="Apply"); apply_b.get_style_context().add_class("pill"); apply_b.get_style_context().add_class("active")
+        reset_b = Gtk.Button(label="Reset"); reset_b.get_style_context().add_class("pill")
+        btn_row.pack_end(apply_b, False, False, 0); btn_row.pack_end(reset_b, False, False, 0)
+        bar_box.pack_start(btn_row, False, False, 0)
+        confirm = Gtk.Box(spacing=10); confirm.set_no_show_all(True)
+        c_lab = label("", "title", ellipsize=False)
+        keep_b = Gtk.Button(label="Keep changes"); keep_b.get_style_context().add_class("pill"); keep_b.get_style_context().add_class("active")
+        undo_b = Gtk.Button(label="Revert"); undo_b.get_style_context().add_class("pill")
+        confirm.pack_start(c_lab, True, True, 0); confirm.pack_end(keep_b, False, False, 0); confirm.pack_end(undo_b, False, False, 0)
+        bar_box.pack_start(confirm, False, False, 0)
+
+        def refresh_bar():
+            counting = st["timer"] is not None
+            btn_row.set_visible(not counting)
+            apply_b.set_sensitive(dirty()); reset_b.set_sensitive(dirty())
+            confirm.set_visible(counting)
+
+        def stop_timer():
+            if st["timer"] is not None:
+                GLib.source_remove(st["timer"]); st["timer"] = None
+
+        def revert(*_):
+            stop_timer()
+            ok, m = displays.apply_layout(st["orig"])
+            st["work"] = {k: dict(v) for k, v in st["orig"].items()}
+            say("" if ok else "Could not restore the previous layout: " + m)
+            rebuild()
+
+        def keep(*_):
+            stop_timer()
+            st["outs"] = displays.query()
+            st["orig"] = displays.layout_of(st["outs"])
+            st["work"] = {k: dict(v) for k, v in st["orig"].items()}
+            displays.save(st["orig"])
+            say("Display settings saved. They are restored every time you log in.")
+            rebuild()
+
+        def apply_(*_):
+            say("")
+            ok, m = displays.apply_layout(st["work"])
+            if not ok:
+                say("Could not apply: " + (m or "xrandr failed") + ". Nothing was saved.")
+                revert(); return
+            left = {"n": 15}
+            c_lab.set_text("Keep these display settings?  Reverting in 15 s")
+
+            def tick():
+                left["n"] -= 1
+                if left["n"] <= 0:
+                    st["timer"] = None
+                    revert(); return False
+                c_lab.set_text("Keep these display settings?  Reverting in %d s" % left["n"])
+                return True
+            st["timer"] = GLib.timeout_add_seconds(1, tick)
+            refresh_bar()
+
+        apply_b.connect("clicked", apply_); reset_b.connect("clicked", lambda *_: (st.update(work={k: dict(v) for k, v in st["orig"].items()}), rebuild()))
+        keep_b.connect("clicked", keep); undo_b.connect("clicked", revert)
+        p.connect("destroy", lambda *_: stop_timer())
+
+        # ---- the rest of what "display options" means day to day
+        c2 = self.card("Colour and comfort")
+        tool = "gammastep" if services.have("gammastep") else ("redshift" if services.have("redshift") else None)
+        if tool:
+            row = Gtk.Box(spacing=8)
+            for lab, temp in (("Warm (3500 K)", 3500), ("Warmer (2700 K)", 2700)):
+                b = Gtk.Button(label=lab); b.get_style_context().add_class("clear")
+                b.connect("clicked", lambda _b, t=temp: services.fire([tool, "-O", str(t)])); row.pack_start(b, False, False, 0)
+            off = Gtk.Button(label="Night light off"); off.get_style_context().add_class("clear")
+            off.connect("clicked", lambda *_: services.fire([tool, "-x"])); row.pack_start(off, False, False, 0)
+            c2.inner.pack_start(label("Night light", "h2"), False, False, 2); c2.inner.pack_start(row, False, False, 0)
+        else:
+            c2.inner.pack_start(self.note("Night light needs gammastep or redshift."), False, False, 0)
+        bl = services.Backlight()
+        if bl.available:
+            sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5, 100, 1); sc.set_value((bl.get() or 0.5) * 100); sc.set_value_pos(Gtk.PositionType.RIGHT)
+            sc.connect("value-changed", lambda w: bl.set(w.get_value() / 100.0))
+            c2.inner.pack_start(label("Screen brightness", "h2"), False, False, 4); c2.inner.pack_start(sc, False, False, 0)
+        p.pack_start(c2, False, False, 0)
+        rebuild()
         return p
 
     # ---------------------------------------------- network / bluetooth / power
@@ -733,8 +976,8 @@ class Settings(appkit.GlassWindow):
 
     def p_power(self):
         p = self.page_box(); c = self.card("Power")
-        b = services.battery()
-        c.inner.pack_start(self.row("Battery", label(("%d%%%s" % (b[0], " (charging)" if b[1] else "")) if b else "No battery", "muted")), False, False, 2)
+        b = services.battery_info()
+        c.inner.pack_start(self.row("Battery", label(("%d%% - %s" % (b["percent"], services.battery_text(b))) if b else "No battery", "muted")), False, False, 2)
         if services.have("powerprofilesctl"):
             row = Gtk.Box(spacing=8, homogeneous=True)
             for prof, lab in (("power-saver", "Power saver"), ("balanced", "Balanced"), ("performance", "Performance")):

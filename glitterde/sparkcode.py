@@ -1134,17 +1134,97 @@ class SparkCode(appkit.GlassWindow):
         tb = Gtk.Box(spacing=2)
         self.b_side = icon_button("panel_left", 15, "Toggle sidebar (Ctrl+B)", self.toggle_sidebar, color=ink, pad=8)
         tb.pack_start(self.b_side, False, False, 0)
-        for icon, tip, cb in (("folder_line", "Open folder… (Ctrl+Shift+O)", self.open_folder_dialog), ("doc", "Open file… (Ctrl+O)", self.open_file_dialog),
-                              ("file_plus", "New file (Ctrl+N)", self.new_file), ("save", "Save (Ctrl+S)", self.save)):
-            tb.pack_start(icon_button(icon, 15, tip, cb, color=ink, pad=8), False, False, 0)
+        tb.pack_start(self._build_menubar(), False, False, 4)
         self.crumb = label("", "muted", 0.5)
         tb.pack_start(self.crumb, True, True, 8)
         for icon, tip, cb in (("search", "Go to file… (Ctrl+P)", self.quick_open), ("terminal", "Open terminal here (Ctrl+`)", self.open_terminal)):
             tb.pack_start(icon_button(icon, 15, tip, cb, color=ink, pad=8), False, False, 0)
-        self.b_menu = icon_button("list", 15, "Menu", None, color=ink, pad=8)
-        self.b_menu.connect("clicked", lambda b: self._popup_below(b, self._main_menu_items(), 250))
+        self.b_menu = icon_button("list", 15, "Preferences", None, color=ink, pad=8)
+        self.b_menu.connect("clicked", lambda b: self._popup_below(b, self._prefs_menu_items(), 270))
         tb.pack_start(self.b_menu, False, False, 0)
         return tb
+
+    def _build_menubar(self):
+        """File / Edit / View / Go: glitterDE-styled flat menu buttons that open glass menus (the hamburger now only holds preferences)."""
+        bar = Gtk.Box(spacing=0)
+        bar.get_style_context().add_class("sparkmenubar")
+        self._menubar_btns = {}
+        for name, fn in (("File", self._file_menu_items), ("Edit", self._edit_menu_items), ("View", self._view_menu_items), ("Go", self._go_menu_items)):
+            b = Gtk.Button(label=name); b.set_relief(Gtk.ReliefStyle.NONE); b.set_focus_on_click(False)
+            b.get_style_context().add_class("sparkmenubtn")
+            b.connect("clicked", lambda w, f=fn: self._popup_below(w, f(), 250))
+            b.connect("enter-notify-event", lambda w, _e, n=name: self._menubar_hover(w, n))
+            bar.pack_start(b, False, False, 0); self._menubar_btns[name] = (b, fn)
+        self._menu_open = None
+        return bar
+
+    def _menubar_hover(self, w, name):
+        """While one menu is open, moving over a neighbour switches to it (like a desktop menubar)."""
+        cur = getattr(self, "_menu_open", None)
+        if cur is not None and cur[0] != name and cur[1].get_visible():
+            cur[1].hide()
+            self._popup_below(w, self._menubar_btns[name][1](), 250)
+
+    def _file_menu_items(self):
+        has = self.cur() is not None
+        return [
+            ("itemi", "file_plus", "New file", self.new_file, True, "Ctrl+N"),
+            ("itemi", "doc", "Open file…", self.open_file_dialog, True, "Ctrl+O"),
+            ("itemi", "folder_line", "Open folder…", self.open_folder_dialog, True, "Ctrl+Shift+O"),
+            ("sep",),
+            ("itemi", "save", "Save", self.save, has, "Ctrl+S"),
+            ("itemi", None, "Save as…", self.save_as, has, "Ctrl+Shift+S"),
+            ("item", "Save all", self.save_all, any(x.dirty for x in self.docs)),
+            ("sep",),
+            ("itemi", None, "Close tab", self.close_tab, has, "Ctrl+W"),
+            ("itemi", None, "Quit", self.close, True, ""),
+        ]
+
+    def _edit_menu_items(self):
+        d = self.cur()
+        has = d is not None
+
+        def view_sig(sig):
+            return lambda: (d.view.grab_focus(), d.view.emit(sig))
+        return [
+            ("itemi", None, "Undo", lambda: d.do_undo(), has, "Ctrl+Z"),
+            ("itemi", None, "Redo", lambda: d.do_redo(), has, "Ctrl+Shift+Z"),
+            ("sep",),
+            ("itemi", None, "Cut", view_sig("cut-clipboard"), has, "Ctrl+X"),
+            ("itemi", None, "Copy", view_sig("copy-clipboard"), has, "Ctrl+C"),
+            ("itemi", None, "Paste", view_sig("paste-clipboard"), has, "Ctrl+V"),
+            ("itemi", None, "Select all", view_sig("select-all"), has, "Ctrl+A"),
+            ("sep",),
+            ("head", "Lines"),
+            ("itemi", None, "Duplicate line", lambda: d.duplicate(), has, "Ctrl+Shift+D"),
+            ("itemi", None, "Delete line", lambda: d.delete_lines(), has, "Ctrl+Shift+K"),
+            ("item", "Move line up", lambda: d.move_lines(False), has),
+            ("item", "Move line down", lambda: d.move_lines(True), has),
+            ("itemi", None, "Indent", lambda: d.indent(), has, "Ctrl+]"),
+            ("itemi", None, "Outdent", lambda: d.outdent(), has, "Ctrl+["),
+            ("itemi", None, "Toggle comment", lambda: d.toggle_comment(), has, "Ctrl+/"),
+            ("sep",),
+            ("itemi", "search", "Find…", self.find_open, has, "Ctrl+F"),
+            ("itemi", None, "Replace…", self.replace_open, has, "Ctrl+H"),
+        ]
+
+    def _view_menu_items(self):
+        o = self.opt
+        return [
+            ("check", "Sidebar", o["sidebar"], self.toggle_sidebar),
+            ("itemi", "terminal", "Terminal here", self.open_terminal, True, "Ctrl+`"),
+            ("sep",),
+            ("itemi", None, "Zoom in", lambda: self.zoom(0.1), True, "Ctrl++"),
+            ("itemi", None, "Zoom out", lambda: self.zoom(-0.1), True, "Ctrl+-"),
+            ("itemi", None, "Reset zoom", lambda: self.zoom(0), True, "Ctrl+0"),
+        ]
+
+    def _go_menu_items(self):
+        has = self.cur() is not None
+        return [
+            ("itemi", "search", "Go to file…", self.quick_open, True, "Ctrl+P"),
+            ("itemi", None, "Go to line…", self.goto_line, has, "Ctrl+G"),
+        ]
 
     def _build_welcome(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -1580,6 +1660,7 @@ class SparkCode(appkit.GlassWindow):
         d = Gtk.FileChooserDialog(title=title, transient_for=self, action=action)
         d.add_button("Cancel", Gtk.ResponseType.CANCEL)
         d.add_button(verb, Gtk.ResponseType.OK)
+        appkit.style_stock_dialog(d)
         if start and os.path.isdir(start):
             d.set_current_folder(start)
         return d
@@ -2071,6 +2152,9 @@ class SparkCode(appkit.GlassWindow):
         a = btn.get_allocation()
         m = GlassMenu(items, light=True, theme=self.th, min_width=width)
         m.popup_at(ox + a.x, oy + a.y + a.height + 4)
+        for n, (bb, _f) in getattr(self, "_menubar_btns", {}).items():
+            if bb is btn:
+                self._menu_open = (n, m)
 
     def _popup_above(self, btn, items, width=200):
         win = btn.get_window()
@@ -2083,10 +2167,8 @@ class SparkCode(appkit.GlassWindow):
         h = m.get_preferred_height()[1]
         m.popup_at(ox + a.x, oy + a.y - h - 6)
 
-    def _main_menu_items(self):
+    def _prefs_menu_items(self):
         o = self.opt
-        d = self.cur()
-        has = d is not None
 
         def toggle(key, after=None):
             def f():
@@ -2096,30 +2178,11 @@ class SparkCode(appkit.GlassWindow):
                     after()
             return f
         return [
-            ("itemi", None, "New file", self.new_file, True, "Ctrl+N"),
-            ("itemi", None, "Open file…", self.open_file_dialog, True, "Ctrl+O"),
-            ("itemi", None, "Open folder…", self.open_folder_dialog, True, "Ctrl+Shift+O"),
-            ("itemi", None, "Go to file…", self.quick_open, True, "Ctrl+P"),
-            ("sep",),
-            ("itemi", None, "Save", self.save, has, "Ctrl+S"),
-            ("itemi", None, "Save as…", self.save_as, has, "Ctrl+Shift+S"),
-            ("item", "Save all", self.save_all, any(x.dirty for x in self.docs)),
-            ("itemi", None, "Close tab", self.close_tab, has, "Ctrl+W"),
-            ("sep",),
-            ("itemi", None, "Find…", self.find_open, has, "Ctrl+F"),
-            ("itemi", None, "Replace…", self.replace_open, has, "Ctrl+H"),
-            ("itemi", None, "Go to line…", self.goto_line, has, "Ctrl+G"),
-            ("itemi", None, "Toggle comment", lambda: self.cur().toggle_comment(), has, "Ctrl+/"),
-            ("sep",),
-            ("head", "View"),
-            ("check", "Sidebar", o["sidebar"], self.toggle_sidebar),
+            ("head", "Display"),
             ("check", "Line numbers", o["numbers"], toggle("numbers", self._relayout)),
             ("check", "Word wrap", o["wrap"], toggle("wrap", self._relayout)),
             ("check", "Highlight current line", o["hl_line"], toggle("hl_line", self._relayout)),
             ("check", "Show hidden files", o["hidden"], toggle("hidden", self._reload_tree)),
-            ("itemi", None, "Zoom in", lambda: self.zoom(0.1), True, "Ctrl++"),
-            ("itemi", None, "Zoom out", lambda: self.zoom(-0.1), True, "Ctrl+-"),
-            ("itemi", None, "Reset zoom", lambda: self.zoom(0), True, "Ctrl+0"),
             ("sep",),
             ("head", "Editing"),
             ("check", "Auto-close brackets and quotes", o["pairs"], toggle("pairs")),

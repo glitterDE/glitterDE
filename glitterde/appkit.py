@@ -69,6 +69,25 @@ APP_CSS = b"""
 .darkpanel treeview.view:selected, .darkpanel treeview.view:selected:focus { background-color: rgba(168,150,255,0.46); color: #ffffff; border-radius: 0; }
 .lightpanel treeview.view header button { color: #2a2d6e; background: transparent; border: none; box-shadow: none; }
 .darkpanel treeview.view header button { color: #ecebfa; background: transparent; border: none; box-shadow: none; }
+.sparkmenubar, box.sparkmenubar { background: transparent; background-image: none; border: none; box-shadow: none; padding: 0; }
+.sparkmenubar button.sparkmenubtn { padding: 4px 11px; margin: 0 1px; min-height: 0; min-width: 0; border-radius: 999px; font-weight: 500; background: transparent; background-image: none;
+                                    border: none; box-shadow: none; text-shadow: none; }
+.sparkmenubar button.sparkmenubtn:hover { background-color: rgba(255,255,255,0.26); }
+.sparkmenubar button.sparkmenubtn:active, .sparkmenubar button.sparkmenubtn:checked { background-color: rgba(255,255,255,0.40); }
+.lightpanel switch { border-color: rgba(42,45,110,0.22); }
+.lightpanel switch:checked { background-color: #ff73c4; }
+.lightpanel entry { background-image: none; }
+.lightpanel check, .lightpanel radio { background-color: rgba(255,255,255,0.7); border-color: rgba(42,45,110,0.40); color: #2a2d6e; }
+.lightpanel check:checked, .lightpanel radio:checked { background-color: #ff73c4; border-color: rgba(42,45,110,0.30); color: #ffffff; }
+.lightpanel spinbutton, .lightpanel combobox button { background-color: rgba(255,255,255,0.58); border-color: rgba(255,255,255,0.8); color: #2a2d6e; }
+.lightpanel textview, .lightpanel textview text { color: #2a2d6e; }
+.lightpanel expander arrow { color: #2a2d6e; }
+.lightpanel levelbar trough { background-color: rgba(42,45,110,0.16); }
+.darkpanel switch { border-color: rgba(255,255,255,0.22); }
+.darkpanel check, .darkpanel radio { background-color: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.35); color: #ecebfa; }
+.darkpanel check:checked, .darkpanel radio:checked { background-color: #ff73c4; color: #ffffff; }
+.darkpanel spinbutton, .darkpanel combobox button { background-color: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.20); color: #ecebfa; }
+.darkpanel textview, .darkpanel textview text { color: #ecebfa; }
 progressbar trough { background-color: rgba(120,120,220,0.30); border: none; border-radius: 4px; min-height: 8px; }
 progressbar progress { background-image: linear-gradient(to right, #ffb8e6, #ff8fd2); border: none; border-radius: 4px; min-height: 8px; }
 scale trough { background-color: rgba(120,120,220,0.30); border-radius: 3px; min-height: 5px; }
@@ -84,33 +103,49 @@ notebook > header > tabs > tab:checked { background-color: rgba(255,255,255,0.26
 
 # stock Gtk dialogs (file choosers, app chooser ...) cannot be glass; they get an opaque surface in the scheme's colours instead of the
 # transparent one the base sheet would give them (black on a window without an alpha channel).
-STOCK_CSS = b"""
-.glitter-stock.lightpanel, .glitter-stock.lightpanel .background { background-color: #efecfb; color: #2a2d6e; }
-.glitter-stock.darkpanel, .glitter-stock.darkpanel .background { background-color: #23243f; color: #ecebfa; }
-.glitter-stock.lightpanel label, .glitter-stock.lightpanel button, .glitter-stock.lightpanel treeview.view, .glitter-stock.lightpanel entry { color: #2a2d6e; }
-.glitter-stock.darkpanel label, .glitter-stock.darkpanel button, .glitter-stock.darkpanel treeview.view, .glitter-stock.darkpanel entry { color: #ecebfa; }
-.glitter-stock button { background-image: none; border-radius: 10px; padding: 5px 14px; min-height: 0; box-shadow: none; text-shadow: none; }
-.glitter-stock.lightpanel button { background-color: rgba(42,45,110,0.08); border: 1px solid rgba(42,45,110,0.16); }
-.glitter-stock.lightpanel button:hover { background-color: rgba(96,108,255,0.20); }
-.glitter-stock.darkpanel button { background-color: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.20); }
-.glitter-stock.darkpanel button:hover { background-color: rgba(255,255,255,0.18); }
-.glitter-stock.lightpanel entry { background-color: rgba(255,255,255,0.8); border: 1px solid rgba(42,45,110,0.22); }
-.glitter-stock.darkpanel entry { background-color: rgba(255,255,255,0.09); border: 1px solid rgba(255,255,255,0.18); }
-.glitter-stock.lightpanel treeview.view, .glitter-stock.darkpanel treeview.view { background-color: transparent; }
-.glitter-stock.lightpanel scrolledwindow, .glitter-stock.darkpanel scrolledwindow { border: 1px solid rgba(128,128,200,0.25); border-radius: 8px; }
+_STOCK_TMPL = """
+.glitter-stock.%(c)s, .glitter-stock.%(c)s .background, .glitter-stock.%(c)s box, .glitter-stock.%(c)s stack, .glitter-stock.%(c)s paned,
+.glitter-stock.%(c)s filechooser, .glitter-stock.%(c)s filechooserwidget, .glitter-stock.%(c)s viewport, .glitter-stock.%(c)s actionbar,
+.glitter-stock.%(c)s headerbar, .glitter-stock.%(c)s .dialog-action-area, .glitter-stock.%(c)s .path-bar { background-color: %(surf)s; background-image: none; color: %(ink)s; }
+.glitter-stock.%(c)s placessidebar, .glitter-stock.%(c)s placessidebar list, .glitter-stock.%(c)s placessidebar viewport, .glitter-stock.%(c)s .sidebar,
+.glitter-stock.%(c)s placessidebar scrolledwindow { background-color: %(side)s; background-image: none; }
+.glitter-stock.%(c)s label, .glitter-stock.%(c)s button, .glitter-stock.%(c)s button label, .glitter-stock.%(c)s treeview.view, .glitter-stock.%(c)s entry,
+.glitter-stock.%(c)s placessidebar row, .glitter-stock.%(c)s placessidebar row label, .glitter-stock.%(c)s headerbar label, .glitter-stock.%(c)s menuitem,
+.glitter-stock.%(c)s image, .glitter-stock.%(c)s check, .glitter-stock.%(c)s radio { color: %(ink)s; }
+.glitter-stock.%(c)s label.dim-label, .glitter-stock.%(c)s .dim-label, .glitter-stock.%(c)s treeview.view header button { color: %(soft)s; }
+.glitter-stock.%(c)s placessidebar row:hover, .glitter-stock.%(c)s row:hover, .glitter-stock.%(c)s treeview.view:hover { background-color: %(hover)s; }
+.glitter-stock.%(c)s placessidebar row:selected, .glitter-stock.%(c)s row:selected, .glitter-stock.%(c)s treeview.view:selected,
+.glitter-stock.%(c)s treeview.view:selected:focus { background-color: %(sel)s; color: %(selink)s; }
+.glitter-stock.%(c)s treeview.view { background-color: transparent; }
+.glitter-stock.%(c)s button { background-image: none; background-color: %(btn)s; border: 1px solid %(line)s; border-radius: 10px; padding: 5px 14px; min-height: 0;
+                              box-shadow: none; text-shadow: none; }
+.glitter-stock.%(c)s button:hover { background-color: %(hover)s; }
+.glitter-stock.%(c)s button.suggested-action { background-color: %(sel)s; }
+.glitter-stock.%(c)s entry { background-color: %(entry)s; border: 1px solid %(line)s; border-radius: 8px; }
+.glitter-stock.%(c)s scrolledwindow { border: 1px solid %(line)s; border-radius: 8px; background-color: transparent; }
+.glitter-stock.%(c)s separator { background-color: %(line)s; }
+.glitter-stock.%(c)s popover, .glitter-stock.%(c)s popover box, .glitter-stock.%(c)s menu { background-color: %(side)s; color: %(ink)s; }
 """
-_stock_installed = False
+STOCK_CSS = (
+    _STOCK_TMPL % dict(c="lightpanel", surf="#efecfb", side="#e4e0f7", ink="#2a2d6e", soft="#5a5d94", hover="rgba(96,108,255,0.16)",
+                       sel="rgba(96,108,255,0.40)", selink="#1f2160", btn="rgba(42,45,110,0.08)", line="rgba(42,45,110,0.20)",
+                       entry="rgba(255,255,255,0.80)") +
+    _STOCK_TMPL % dict(c="darkpanel", surf="#23243f", side="#2b2c4d", ink="#ecebfa", soft="#b5b3d6", hover="rgba(255,255,255,0.12)",
+                       sel="rgba(168,150,255,0.46)", selink="#ffffff", btn="rgba(255,255,255,0.10)", line="rgba(255,255,255,0.20)",
+                       entry="rgba(255,255,255,0.09)")).encode()
+_stock_provider = None
 
 
 def style_stock_dialog(d):
-    """Make a plain Gtk dialog (FileChooserDialog, AppChooserDialog ...) legible: opaque surface and ink that follow the colour scheme."""
-    global _stock_installed
-    if not _stock_installed:
-        p = Gtk.CssProvider(); p.load_from_data(STOCK_CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_USER + 14)
-        _stock_installed = True
+    """Make a plain Gtk dialog (FileChooserDialog, AppChooserDialog ...) legible: opaque surface and ink that follow the colour scheme.
+    Also follows a light/dark switch while the dialog is open."""
+    global _stock_provider
+    if _stock_provider is None:
+        _stock_provider = Gtk.CssProvider(); _stock_provider.load_from_data(STOCK_CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), _stock_provider, Gtk.STYLE_PROVIDER_PRIORITY_USER + 14)
     ctx = d.get_style_context()
-    ctx.add_class("glitter-stock"); ctx.add_class(scheme.panel_class())
+    ctx.add_class("glitter-stock")
+    ctx.remove_class("lightpanel"); ctx.remove_class("darkpanel"); ctx.add_class(scheme.panel_class())
     return d
 
 
