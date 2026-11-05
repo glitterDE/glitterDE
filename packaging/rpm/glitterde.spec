@@ -3,7 +3,7 @@
 %global _build_id_links none
 
 Name:           glitterde
-Version:        %{?pkgversion}%{!?pkgversion:0.14.1}
+Version:        %{?pkgversion}%{!?pkgversion:0.15.0}
 Release:        1%{?dist}
 Summary:        A customisable but pretty desktop environment :3
 License:        GPL-3.0-only
@@ -83,6 +83,7 @@ make install DESTDIR=%{buildroot} PREFIX=%{_prefix} LIBDIR=%{_prefix}/lib/glitte
 %{_bindir}/glitterde-shell
 %{_bindir}/glitterde-welcome
 %{_bindir}/glitterde-autostart
+%{_bindir}/glitterde-mediakey
 %{_bindir}/glitter-wm
 %{_bindir}/glitter-comp
 %{_bindir}/sparkfiles
@@ -97,6 +98,24 @@ make install DESTDIR=%{buildroot} PREFIX=%{_prefix} LIBDIR=%{_prefix}/lib/glitte
 %{_datadir}/doc/glitterde
 
 %changelog
+* Thu Nov 5 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.15.0-1
+- Allow dragging several selected files at once in SparkFiles
+- Dropping files into the folder they are already in no longer copies them
+- AppIndicator / StatusNotifierItem icons are now shown
+- Redesigned clock and battery flyouts
+- Add charging indicator on the panel's battery icon
+- Added option to show seconds on the panel clock
+- Rebuilt cards shown on panel icon hover
+- Cursor theme/size published to all apps running in glitterDE
+- Fix transparency not turning off
+- Make transparency more consistent across all flyouts
+- Add support for panel and dock right click menus
+- Added basic handling for media control keys
+- Added "Displays" tab in SparkSettings
+- Show VPN connections in separate panel flyout
+- Switch to using a traditional menubar in SparkCode
+- Show multiple indicators if more than one app window is open
+- Enable pinning folders to SparkFiles' sidebar
 * Sun Nov 1 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.14.1-1
 - Add SparkCode
 * Sun Nov 1 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.14.0-1

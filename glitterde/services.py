@@ -230,51 +230,125 @@ def _read(path):
         return f.read().strip()
 
 
-def battery(base="/sys/class/power_supply"):
-    """(percent, charging) for the machine's own battery, or None when it has none.
-    Peripheral batteries (wireless mouse, keyboard, game pad: scope "Device") are not the machine's battery; a laptop with two
-    batteries is shown as one, weighted by capacity; batteries that only report energy_*/charge_* (no "capacity" file) still work."""
+def _power_base(base=None):
+    """sysfs power_supply directory. GLITTERDE_POWER_SUPPLY points it elsewhere (tests, demos)."""
+    return base or os.environ.get("GLITTERDE_POWER_SUPPLY") or "/sys/class/power_supply"
+
+
+def _int(path):
+    try:
+        return int(_read(path))
+    except (OSError, ValueError):
+        return None
+
+
+def battery_info(base=None):
+    """Everything the panel and the power flyout show about the machine's own battery, or None when it has none:
+      percent  0-100          state    "charging" | "discharging" | "full" | "idle" (plugged in, not charging)
+      plugged  mains / USB-PD supply online       seconds  time to empty (discharging) or to full (charging), None if unknown
+      watts    power flowing now (None if unknown)   health   full capacity vs design capacity in %, None if unknown
+      cycles   charge cycles, None if unknown
+    Peripheral batteries (wireless mouse, keyboard, game pad: scope "Device") are not the machine's battery; a laptop with two batteries
+    is shown as one, weighted by capacity; batteries that only report energy_*/charge_* (no "capacity" file) still work."""
+    base = _power_base(base)
     if not os.path.isdir(base):
         return None
-    cells = []                                    # (now, full, percent, status)
+    cells, plugged = [], False
     for n in sorted(os.listdir(base)):
         p = os.path.join(base, n)
         try:
-            if _read(os.path.join(p, "type")) != "Battery":
-                continue
-            try:
-                if _read(os.path.join(p, "scope")) == "Device":
-                    continue
-            except OSError:
-                pass                                # no scope file = the system's own battery
-            status = _read(os.path.join(p, "status"))
+            typ = _read(os.path.join(p, "type"))
         except OSError:
             continue
-        pct = None
+        if typ != "Battery":
+            if typ in ("Mains", "USB", "USB_C", "USB_PD", "USB_DCP", "USB_CDP", "USB_ACA") and _int(os.path.join(p, "online")) == 1:
+                plugged = True
+            continue
         try:
-            pct = int(_read(os.path.join(p, "capacity")))
-        except (OSError, ValueError):
-            pass
-        now = full = None
-        for a, b in (("energy_now", "energy_full"), ("charge_now", "charge_full")):
-            try:
-                now, full = int(_read(os.path.join(p, a))), int(_read(os.path.join(p, b)))
+            if _read(os.path.join(p, "scope")) == "Device":
+                continue
+        except OSError:
+            pass                                    # no scope file = the system's own battery
+        try:
+            status = _read(os.path.join(p, "status"))
+        except OSError:
+            status = "Unknown"
+        pct = _int(os.path.join(p, "capacity"))
+        now = full = design = rate = None
+        for a, b, d in (("energy_now", "energy_full", "energy_full_design"), ("charge_now", "charge_full", "charge_full_design")):
+            now, full = _int(os.path.join(p, a)), _int(os.path.join(p, b))
+            if now is not None and full:
+                design = _int(os.path.join(p, d))
                 break
-            except (OSError, ValueError):
-                now = full = None
+            now = full = None
+        pw, cur, volt = (_int(os.path.join(p, k)) for k in ("power_now", "current_now", "voltage_now"))
+        watts = abs(pw) / 1e6 if pw else (abs(cur) * volt / 1e12 if cur and volt else None)
+        if full and now is not None:
+            rate = abs(pw) if (pw and a == "energy_now") else (abs(cur) if (cur and a == "charge_now") else None)
         if pct is None and full:
             pct = round(100.0 * now / full)
-        if pct is not None:
-            cells.append((now, full, max(0, min(100, pct)), status))
+        if pct is None:
+            continue
+        direct = _int(os.path.join(p, "time_to_empty_now")) if status == "Discharging" else _int(os.path.join(p, "time_to_full_now"))
+        cells.append(dict(now=now, full=full, design=design, rate=rate, pct=max(0, min(100, pct)), status=status, watts=watts,
+                          direct=direct if direct and direct > 0 else None, cycles=_int(os.path.join(p, "cycle_count"))))
     if not cells:
         return None
-    if len(cells) > 1 and all(c[1] for c in cells):
-        pct = round(100.0 * sum(c[0] for c in cells) / sum(c[1] for c in cells))
+    if len(cells) > 1 and all(c["full"] for c in cells):
+        pct = round(100.0 * sum(c["now"] for c in cells) / sum(c["full"] for c in cells))
     else:
-        pct = round(sum(c[2] for c in cells) / len(cells))
-    stats = [c[3] for c in cells]
-    # "Full" on one battery while the other still discharges (ThinkPads do this) is not "plugged in"
-    return max(0, min(100, pct)), ("Charging" in stats) or all(st == "Full" for st in stats)
+        pct = round(sum(c["pct"] for c in cells) / len(cells))
+    stats = [c["status"] for c in cells]
+    if "Charging" in stats:
+        state = "charging"
+    elif "Discharging" in stats:
+        state = "discharging"
+    elif all(st == "Full" for st in stats):
+        state = "full"
+    else:
+        state = "idle" if (plugged or "Not charging" in stats) else "discharging"
+    if state in ("charging", "full", "idle"):
+        plugged = True
+    seconds = None
+    if state in ("charging", "discharging"):
+        sel = [c for c in cells if c["status"] == ("Charging" if state == "charging" else "Discharging")]
+        rate = sum(c["rate"] for c in sel if c["rate"]) if all(c["rate"] for c in sel) else 0
+        if rate and all(c["full"] for c in sel):
+            left = sum((c["full"] - c["now"]) if state == "charging" else c["now"] for c in sel)
+            seconds = int(3600.0 * left / rate)
+        elif len(sel) == 1 and sel[0]["direct"]:
+            seconds = sel[0]["direct"]
+        if seconds is not None and not (0 < seconds < 100 * 3600):
+            seconds = None
+    watts = sum(c["watts"] for c in cells if c["watts"]) or None
+    health = None
+    if all(c["full"] and c["design"] for c in cells):
+        health = max(0, min(100, round(100.0 * sum(c["full"] for c in cells) / sum(c["design"] for c in cells))))
+    cyc = [c["cycles"] for c in cells if c["cycles"]]
+    return dict(percent=max(0, min(100, pct)), state=state, plugged=plugged, seconds=seconds, watts=watts, health=health,
+                cycles=max(cyc) if cyc else None)
+
+
+def battery(base=None):
+    """(percent, charging) for the machine's own battery, or None when it has none. `charging` is True only while it is really charging."""
+    b = battery_info(base)
+    return None if b is None else (b["percent"], b["state"] == "charging")
+
+
+def fmt_duration(sec):
+    """4980 -> "1 h 23 min"; 2400 -> "40 min"."""
+    m = max(1, int(round(sec / 60.0)))
+    return "%d h %02d min" % (m // 60, m % 60) if m >= 60 else "%d min" % m
+
+
+def battery_text(i):
+    """One line for tooltips and the power flyout: "Charging - 57 min until full"."""
+    if not i:
+        return "No battery"
+    t = fmt_duration(i["seconds"]) if i.get("seconds") else None
+    return {"charging": "Charging" + (" - %s until full" % t if t else ""),
+            "discharging": "On battery" + (" - %s left" % t if t else ""),
+            "full": "Fully charged", "idle": "Plugged in, not charging"}[i["state"]]
 
 
 # -------------------------------------------------------- volume / brightness

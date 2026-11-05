@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import sys
+import threading
 import time
 
 import gi
@@ -19,11 +20,11 @@ try:
 except (ValueError, ImportError):
     Wnck = None
 
-from . import automount, config, gfx, netbt, netui, scheme, services
+from . import automount, config, desktopenv, gfx, netbt, netui, scheme, services
 from . import settings_model as prefs
 from . import icons as ic
 from .menus import GlassConfirm, GlassMenu
-from .widgets import popup_menu, Bar, Desktop, Ico, Ring, Spark, compositing, icon_button, install_css, label, search_overlay
+from .widgets import popup_menu, Bar, Desktop, Ico, LevelBar, MonthGrid, Ring, Spark, compositing, icon_button, install_css, label, search_overlay
 
 EXTRA_CSS = b"""
 .panel-bottom { border-top: 1px solid rgba(255,255,255,0.12); }
@@ -58,17 +59,34 @@ entry.withicon { padding-left: 32px; }
 .hovcard.lightpanel label { color: #2a2d6e; }
 .hovcard.lightpanel label.hovhead, .hovcard.lightpanel label.hovsub { color: rgba(42,45,110,0.66); }
 .hovcard.lightpanel .hovrow:hover { background-color: rgba(96,108,255,0.16); }
-.hovcard.lightpanel .hovrow.act { background-color: rgba(96,108,255,0.12); }
+.hovcard.lightpanel .hovrow.act { background-color: rgba(96,108,255,0.10); }
+.hovcard.lightpanel .hovicon { background-color: rgba(42,45,110,0.08); }
+.lightpanel label.flytime, .lightpanel label.flydate, .lightpanel label.flybig, .lightpanel label.monthtitle { color: #2a2d6e; text-shadow: none; }
 .hovcard.lightpanel .hovrow.mini label.hovtitle { color: rgba(42,45,110,0.55); }
 .hovcard label { color: #ffffff; }
 .hovcard label.hovhead { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: rgba(255,255,255,0.62); }
 .hovcard label.hovsub { font-size: 11px; color: rgba(255,255,255,0.62); }
-.hovrow { padding: 7px 8px 7px 12px; border-radius: 14px; border-left: 3px solid transparent; }
-.hovrow:hover { background-color: rgba(255,255,255,0.20); }
-.hovrow.act { background-color: rgba(255,255,255,0.12); border-left-color: #ff9bd8; }
+.hovrow { border-radius: 14px; }
+.hovrow:hover { background-color: rgba(255,255,255,0.17); }
+.hovrow.act { background-color: rgba(255,255,255,0.08); }
 .hovrow.mini label.hovtitle { color: rgba(255,255,255,0.6); }
-.hovx { border-radius: 999px; min-width: 24px; min-height: 24px; }
-.hovx:hover { background-color: rgba(255,92,134,0.9); }
+.hovrow label.hovtitle { font-size: 12.5px; font-weight: 600; }
+.hovdot { min-width: 3px; min-height: 18px; border-radius: 2px; background-color: transparent; }
+.hovrow.act .hovdot { background-color: #ff9bd8; }
+.hovicon { min-width: 36px; min-height: 36px; border-radius: 11px; background-color: rgba(255,255,255,0.10); }
+.hovrow .hovx { opacity: 0; border-radius: 999px; min-width: 24px; min-height: 24px; }
+.hovrow:hover .hovx { opacity: 1; background-color: rgba(255,255,255,0.14); }
+.hovrow .hovx:hover { background-color: rgba(255,92,134,0.92); }
+.flytime { font-size: 38px; font-weight: 300; font-feature-settings: "tnum"; }
+.flydate { font-size: 14px; font-weight: 500; }
+.flybig { font-size: 30px; font-weight: 300; font-feature-settings: "tnum"; }
+.panelclock { font-feature-settings: "tnum"; }
+.monthtitle { font-size: 13px; font-weight: 700; }
+.flystat { background-color: rgba(255,255,255,0.09); border-radius: 12px; }
+.lightpanel .flystat { background-color: rgba(42,45,110,0.07); }
+.flyseg button { border-radius: 10px; padding: 6px 4px; }
+.flyseg button.on { background-color: rgba(155,125,240,0.62); }
+.flyseg button.on label { color: #ffffff; }
 .deskicon label { text-shadow: 0 1px 3px rgba(20,10,80,0.75); font-weight: 500; }
 flowboxchild:hover { background-color: rgba(255,255,255,0.20); }
 .catrow label { font-size: 12px; }
@@ -88,6 +106,31 @@ flowboxchild:hover { background-color: rgba(255,255,255,0.20); }
 .lay-kickoff iconview.view, .lay-list iconview.view { border-radius: 8px; }
 .badge { background-color: #f95cb8; border-radius: 8px; padding: 0 5px; font-size: 9px; font-weight: 700; }
 .dim { opacity: 0.55; }
+/* light scheme: the base sheet is written for dark glass (white ink, white-tinted buttons). Everything a flyout can contain needs a light twin. */
+.lightpanel label.muted, .lightpanel label.tiny { text-shadow: none; }
+.lightpanel label.tiny { color: rgba(42,45,110,0.72); }
+.lightpanel label.big, .lightpanel label.title, .lightpanel label.clock, .lightpanel label.date { color: #2a2d6e; text-shadow: none; }
+.lightpanel button:hover { background-color: rgba(96,108,255,0.16); }
+.lightpanel button:active { background-color: rgba(96,108,255,0.26); }
+.lightpanel button:focus { background-color: rgba(96,108,255,0.10); }
+.lightpanel button.tile { background-color: rgba(42,45,110,0.07); border-color: rgba(42,45,110,0.16); }
+.lightpanel button.tile:hover { background-color: rgba(96,108,255,0.20); }
+.lightpanel button.tile.on { background-color: rgba(96,108,255,0.45); border-color: rgba(42,45,110,0.30); }
+.lightpanel button.clear { background-color: rgba(42,45,110,0.08); border-color: rgba(42,45,110,0.14); }
+.lightpanel button.clear:hover { background-color: rgba(96,108,255,0.22); }
+.lightpanel button.pill.active, .lightpanel button.pill.active label { color: #ffffff; }
+.lightpanel entry placeholder, .lightpanel entry text placeholder { color: rgba(42,45,110,0.55); }
+.lightpanel entry selection { color: #ffffff; }
+.lightpanel calendar, .lightpanel calendar.header, .lightpanel calendar.button { color: #2a2d6e; }
+.lightpanel calendar.header { border-bottom-color: rgba(42,45,110,0.2); }
+.lightpanel calendar.highlight { color: rgba(42,45,110,0.7); }
+.lightpanel calendar:indeterminate { color: rgba(42,45,110,0.35); }
+.lightpanel calendar:selected { color: #ffffff; }
+.lightpanel separator { background-color: rgba(42,45,110,0.18); }
+.lightpanel scale trough { background-color: rgba(42,45,110,0.20); }
+.lightpanel switch { background-color: rgba(42,45,110,0.22); }
+.lightpanel switch:checked { background-color: #ff73c4; }
+.lightpanel progressbar trough { background-color: rgba(42,45,110,0.18); }
 """
 
 
@@ -180,13 +223,13 @@ class WindowHover(Popup):
     """Card listing the windows of a dock item (or a workspace) when the pointer rests on it. Click a row to bring that window forward."""
 
     def __init__(self, shell):
-        super().__init__(shell, "dock", 16, Gdk.WindowTypeHint.TOOLTIP)
+        super().__init__(shell, "dock", 18, Gdk.WindowTypeHint.TOOLTIP)
         self.set_accept_focus(False); self.set_focus_on_map(False)
         self.get_style_context().add_class("hovcard")
         self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         for m in ("top", "bottom", "start", "end"):
-            getattr(self.box, "set_margin_" + m)(10)
-        self.box.set_spacing(3)
+            getattr(self.box, "set_margin_" + m)(7)
+        self.box.set_spacing(2)
         self.add(self.box)
         self._t = None
         self.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
@@ -211,21 +254,28 @@ class WindowHover(Popup):
         self.hide()
 
     def _row(self, w):
+        """One window. GTK3's EventBox ignores CSS padding, so all spacing is margins on the box inside it."""
         ev = Gtk.EventBox(); ev.set_visible_window(True)
         ctx = ev.get_style_context(); ctx.add_class("hovrow")
         if w.is_active():
             ctx.add_class("act")
         if w.is_minimized():
             ctx.add_class("mini")
-        h = Gtk.Box(spacing=12)
+        h = Gtk.Box(spacing=10)
+        for m, v in (("top", 6), ("bottom", 6), ("start", 4), ("end", 8)):
+            getattr(h, "set_margin_" + m)(v)
+        dot = Gtk.Box(); dot.get_style_context().add_class("hovdot"); dot.set_valign(Gtk.Align.CENTER)
+        h.pack_start(dot, False, False, 0)
+        tile = Gtk.Box(); tile.get_style_context().add_class("hovicon"); tile.set_valign(Gtk.Align.CENTER)
         pb = w.get_icon() or w.get_mini_icon()
         if pb is not None:
-            if pb.get_width() != 28:
-                pb = pb.scale_simple(28, 28, GdkPixbuf.InterpType.BILINEAR)
-            im = Gtk.Image.new_from_pixbuf(pb); im.set_valign(Gtk.Align.CENTER); h.pack_start(im, False, False, 0)
+            pb = pb.scale_simple(24, 24, GdkPixbuf.InterpType.BILINEAR)
+            im = Gtk.Image.new_from_pixbuf(pb); im.set_halign(Gtk.Align.CENTER); im.set_valign(Gtk.Align.CENTER); im.set_hexpand(True)
+            tile.pack_start(im, True, True, 0)
+        h.pack_start(tile, False, False, 0)
         name = w.get_name() or w.get_class_group_name() or "Window"
         col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1); col.set_valign(Gtk.Align.CENTER)
-        t = label(name if len(name) < 34 else name[:32] + "…", "hovtitle", ellipsize=False); t.set_xalign(0)
+        t = label(name, "hovtitle"); t.set_xalign(0); t.set_width_chars(16); t.set_max_width_chars(46)
         col.pack_start(t, False, False, 0)
         sub = "Minimised" if w.is_minimized() else ""
         try:
@@ -236,15 +286,17 @@ class WindowHover(Popup):
             pass
         if sub:
             sl = label(sub, "hovsub", ellipsize=False); sl.set_xalign(0); col.pack_start(sl, False, False, 0)
-        col.set_size_request(190, -1)
         h.pack_start(col, True, True, 0)
         x = Gtk.EventBox(); x.set_visible_window(True); x.get_style_context().add_class("hovx"); x.set_valign(Gtk.Align.CENTER)
-        x.add(Ico("close", 10, scheme.ink(), 1.7)); x.set_tooltip_text("Close window")
+        xi = Ico("close", 10, scheme.ink(), 1.7); xi.set_halign(Gtk.Align.CENTER); xi.set_valign(Gtk.Align.CENTER); xi.set_hexpand(True)
+        x.add(xi); x.set_tooltip_text("Close window")
         x.connect("button-release-event", lambda _w, e, w=w: (w.close(Gtk.get_current_event_time()), self.hide_now(), True)[2])
         h.pack_end(x, False, False, 0)
         ev.add(h)
-        ev.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK)
+        ev.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
         ev.connect("button-release-event", lambda _w, e, w=w: (self.pick(w), True)[1] if e.button == 1 else False)
+        ev.connect("enter-notify-event", lambda *_: (ev.set_state_flags(Gtk.StateFlags.PRELIGHT, False), False)[1])
+        ev.connect("leave-notify-event", lambda *_: (ev.unset_state_flags(Gtk.StateFlags.PRELIGHT), False)[1])
         return ev
 
     def pick(self, w):
@@ -265,7 +317,7 @@ class WindowHover(Popup):
         if not wins:
             self.hide(); return
         if title:
-            hd = label(title.upper(), "hovhead", ellipsize=False); hd.set_xalign(0); hd.set_margin_start(12); hd.set_margin_top(2); hd.set_margin_bottom(4)
+            hd = label(title.upper(), "hovhead", ellipsize=False); hd.set_xalign(0); hd.set_margin_start(10); hd.set_margin_top(4); hd.set_margin_bottom(3)
             self.box.pack_start(hd, False, False, 0)
         for w in wins:
             self.box.pack_start(self._row(w), False, False, 0)
@@ -318,6 +370,153 @@ class WindowHover(Popup):
         self.move(x, y)
         if self.get_window() is not None:
             self.get_window().raise_()                    # above everything else we own, but placed so it no longer covers the dock
+
+
+class PanelResults(Popup):
+    """Results card for the panel search field. It is independent of the launcher: it hangs under the field (above it when the panel is at
+    the bottom), never takes the keyboard focus from the field, and the field keeps working with Up / Down / Enter / Esc."""
+    MAX = 7
+
+    def __init__(self, shell):
+        super().__init__(shell, "dock", 18, Gdk.WindowTypeHint.TOOLTIP)      # a tooltip-type window: the WM never gives it the keyboard focus
+        self.set_accept_focus(False); self.set_focus_on_map(False)
+        self.get_style_context().add_class("hovcard")
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(self.box, "set_margin_" + m)(7)
+        self.add(self.box)
+        self.items, self.sel = [], 0
+
+    @staticmethod
+    def _calc(q):
+        import ast, operator
+        ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv, ast.Pow: operator.pow,
+               ast.Mod: operator.mod, ast.USub: operator.neg, ast.UAdd: operator.pos}
+
+        def ev(n):
+            if isinstance(n, ast.Expression):
+                return ev(n.body)
+            if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+                return n.value
+            if isinstance(n, ast.BinOp) and type(n.op) in ops:
+                a, b = ev(n.left), ev(n.right)
+                if isinstance(n.op, ast.Pow) and abs(b) > 100:
+                    raise ValueError
+                return ops[type(n.op)](a, b)
+            if isinstance(n, ast.UnaryOp) and type(n.op) in ops:
+                return ops[type(n.op)](ev(n.operand))
+            raise ValueError
+        if not any(c.isdigit() for c in q) or not any(c in q for c in "+-*/^%"):
+            return None
+        try:
+            v = ev(ast.parse(q.replace("^", "**").replace("x", "*"), mode="eval"))
+        except (ValueError, SyntaxError, ZeroDivisionError, OverflowError, RecursionError):
+            return None
+        return ("%.10g" % v)
+
+    def search(self, text):
+        q = text.strip().lower()
+        res = []
+        if not q:
+            return res
+        calc = self._calc(text.strip())
+        if calc is not None:
+            res.append(("calc", calc, text.strip() + " ="))
+        scored = []
+        for a in self.shell.apps:
+            n = a.get_display_name().lower()
+            kw = " ".join(filter(None, [a.get_generic_name() or "", (a.get_description() or "") if hasattr(a, "get_description") else ""])).lower()
+            if n.startswith(q):
+                rank = 0
+            elif q in n:
+                rank = 1
+            elif q in kw:
+                rank = 2
+            else:
+                continue
+            scored.append((rank, n, a))
+        scored.sort(key=lambda t: (t[0], t[1]))
+        for _r, _n, a in scored[:self.MAX]:
+            res.append(("app", a, a.get_display_name()))
+        res.append(("launcher", text.strip(), 'Search for "%s" in the launcher' % text.strip()))
+        return res
+
+    def show_for(self, entry, text):
+        res = self.search(text)
+        if not res:
+            self.hide(); return
+        self.restyle()
+        self.items, self.sel = res, 0
+        self.render()
+        self.show_all(); self.resize(1, 1)
+        gw = entry.get_window()
+        if gw is None:
+            return
+        _, ox, oy = gw.get_origin(); a = entry.get_allocation()
+        ax, ay = (ox + a.x, oy + a.y) if not entry.get_has_window() else (ox, oy)
+        w = max(a.width, 380)
+        self.box.set_size_request(w - 14, -1)
+        ph = self.get_preferred_size()[1].height
+        mx, my, mw, mh = self.shell.mon
+        top, bot = self.shell._inset()
+        x = max(mx + 6, min(ax + a.width // 2 - w // 2, mx + mw - w - 6))
+        y = (my + mh - bot - ph - 6) if bot else (my + top + 6)
+        self.move(x, y)
+
+    def render(self):
+        for ch in self.box.get_children():
+            self.box.remove(ch); ch.destroy()
+        for i, (kind, val, title) in enumerate(self.items):
+            ev = Gtk.EventBox(); ev.set_visible_window(True)
+            ctx = ev.get_style_context(); ctx.add_class("hovrow")
+            if i == self.sel:
+                ctx.add_class("act")
+            h = Gtk.Box(spacing=10); h.set_halign(Gtk.Align.FILL); h.set_hexpand(True)
+            for m, v in (("top", 6), ("bottom", 6), ("start", 8), ("end", 8)):
+                getattr(h, "set_margin_" + m)(v)
+            tile = Gtk.Box(); tile.get_style_context().add_class("hovicon"); tile.set_valign(Gtk.Align.CENTER); tile.set_halign(Gtk.Align.START)
+            if kind == "app":
+                im = Gtk.Image.new_from_gicon(val.get_icon() or Gio.ThemedIcon.new("application-x-executable"), Gtk.IconSize.DND); im.set_pixel_size(24)
+                im.set_hexpand(True); tile.pack_start(im, True, True, 0)
+            else:
+                ic_ = Ico("grid" if kind == "launcher" else "chip", 16, scheme.ink(), 1.6); ic_.set_hexpand(True); tile.pack_start(ic_, True, True, 0)
+            h.pack_start(tile, False, False, 0)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1); col.set_valign(Gtk.Align.CENTER)
+            col.set_halign(Gtk.Align.FILL); col.set_hexpand(True)
+            t = label(val if kind == "calc" else title, "hovtitle"); t.set_xalign(0); t.set_halign(Gtk.Align.START); t.set_max_width_chars(46)
+            col.pack_start(t, False, False, 0)
+            if kind == "calc":
+                sl = label(title + " (press Enter to copy)", "hovsub", ellipsize=False); sl.set_xalign(0); sl.set_halign(Gtk.Align.START); col.pack_start(sl, False, False, 0)
+            elif kind == "app" and val.get_generic_name():
+                sl = label(val.get_generic_name(), "hovsub"); sl.set_xalign(0); sl.set_halign(Gtk.Align.START); col.pack_start(sl, False, False, 0)
+            h.pack_start(col, True, True, 0)
+            ev.add(h)
+            ev.add_events(Gdk.EventMask.BUTTON_RELEASE_MASK)
+            ev.connect("button-release-event", lambda _w, e, i=i: (self.activate(i), True)[1])
+            self.box.pack_start(ev, False, False, 0)
+        self.box.show_all()
+
+    def move_sel(self, d):
+        if self.items:
+            self.sel = (self.sel + d) % len(self.items)
+            self.render()
+
+    def activate(self, i=None):
+        if not self.items:
+            return False
+        kind, val, _t = self.items[self.sel if i is None else i]
+        sh = self.shell
+        self.hide()
+        sh.panel_entry.set_text("")
+        sh.panel_entry.get_toplevel().set_focus(None)
+        if kind == "app":
+            sh.launch(val)
+        elif kind == "calc":
+            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(val, -1)
+            sh.show_toast("Copied", val, None, 2500)
+        else:
+            sh.open_launcher(val)
+        return True
 
 
 class DemoMedia:
@@ -395,7 +594,7 @@ class LiveShell:
         if self.demo:
             self._demo_data()
         self.tick_stats(); GLib.timeout_add_seconds(3, self.tick_stats)
-        self.tick_clock(); GLib.timeout_add_seconds(8, self.tick_slow)
+        self.tick_clock(); GLib.timeout_add_seconds(8, self.tick_slow); GLib.timeout_add_seconds(3, self.tick_battery)
         self._wire_window()
         self.desk.connect("size-allocate", self._on_alloc)
         self.win.show_all()
@@ -418,10 +617,36 @@ class LiveShell:
         GLib.timeout_add(1200, lambda: (self.show_toast("Welcome to glitterDE", "A blank slate: right-click the desktop to add widgets, or press Super to open apps.", None, 9000), False)[1])
 
     def _panel_search(self, e):
+        """The panel field searches on its own: a results card under it (apps, a calculator), without opening the launcher."""
+        if not self._ready or self.use_popups is False:
+            return
         t = e.get_text()
-        if t and self._ready:                        # typing in the panel hands over to the launcher with the text
-            e.set_text("")
-            self.open_launcher(t)
+        if getattr(self, "_pres", None) is None:
+            self._pres = PanelResults(self)
+        if not t.strip():
+            self._pres.hide(); return
+        self.close_flyouts(keep="panelsearch")
+        self._pres.show_for(e, t)
+
+    def _panel_key(self, e, ev):
+        r = getattr(self, "_pres", None)
+        if r is None or not r.get_visible():
+            return False
+        if ev.keyval in (Gdk.KEY_Down, Gdk.KEY_Tab):
+            r.move_sel(1); return True
+        if ev.keyval in (Gdk.KEY_Up, Gdk.KEY_ISO_Left_Tab):
+            r.move_sel(-1); return True
+        if ev.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            return r.activate()
+        if ev.keyval == Gdk.KEY_Escape:
+            r.hide(); e.set_text(""); self.win.set_focus(None); return True
+        return False
+
+    def _panel_results_hide(self):
+        r = getattr(self, "_pres", None)
+        if r is not None and not self.panel_entry.has_focus():
+            r.hide()
+        return False
 
     def apply_cursor(self):
         c = config.load().get("cursor", {})
@@ -429,10 +654,12 @@ class LiveShell:
         theme = config.cursor_theme()
         if theme:
             st.set_property("gtk-cursor-theme-name", theme)
-            os.environ["XCURSOR_THEME"] = theme                      # apps launched from here inherit it
         if c.get("size"):
             st.set_property("gtk-cursor-theme-size", int(c["size"]))
-            os.environ["XCURSOR_SIZE"] = str(int(c["size"]))
+        key = (theme, c.get("size"))
+        if key != getattr(self, "_cursor_pub", None):                # publish to the rest of the desktop only when it changed
+            self._cursor_pub = key
+            threading.Thread(target=desktopenv.apply_cursor, daemon=True).start()
 
     def _maybe_welcome(self):
         """First run (no saved choices yet) or --welcome: start the full-screen welcome flow, once."""
@@ -491,7 +718,7 @@ class LiveShell:
             if k == "bluetooth":
                 show = show and (self.bt_present or self.demo)
             self.tray_btns[k].set_visible(bool(show))
-        self.tick_clock_once()
+        self.tick_clock()                         # also re-times the ticker when "Show seconds" changed
         self.tick_slow()
 
     def _dock_icon_px(self):
@@ -531,7 +758,7 @@ class LiveShell:
             if style == "panel_center":
                 self.panel.set_center_widget(dock)
             elif style == "panel_left":
-                self._panel_left.pack_start(dock, False, False, 8); self._panel_left.reorder_child(dock, 1)    # right after the logo
+                self._panel_left.pack_start(dock, False, False, 8); self._panel_left.reorder_child(dock, 2)    # logo, greeting, then the apps
             else:
                 self._panel_right.pack_start(dock, False, False, 8); self._panel_right.reorder_child(dock, 0)
         self._dock_style = style
@@ -581,9 +808,9 @@ class LiveShell:
         self.panel_entry.set_width_chars(34)
         self.panel_entry.get_style_context().add_class("withicon")
         self._ready = False
-        self.panel_entry.connect("focus-in-event", lambda *_: (self.open_launcher() if self._ready else None, False)[1])
         self.panel_entry.connect("changed", self._panel_search)
-        self.panel_entry.connect("activate", lambda e: self.open_launcher(e.get_text() or None, enter=True))
+        self.panel_entry.connect("key-press-event", self._panel_key)
+        self.panel_entry.connect("focus-out-event", lambda *_: (GLib.timeout_add(120, self._panel_results_hide), False)[1])
         c = Gtk.Box(); c.set_valign(Gtk.Align.CENTER); c.pack_start(self._with_search_icon(self.panel_entry), True, True, 0)
         self.search_wrap = c
         self.panel.set_center_widget(c)
@@ -591,6 +818,8 @@ class LiveShell:
         right = Gtk.Box(spacing=0)
         self._panel_right = right
         right.set_margin_end(10)
+        self.sni_box = Gtk.Box(spacing=0); self.sni_box.set_no_show_all(True)       # app tray icons (StatusNotifierItem / AppIndicator)
+        right.pack_start(self.sni_box, False, False, 0)
         self.bell = icon_button("bell", 17, "Notifications", lambda: self.toggle_notifs())
         self.bell_badge = label("", "badge"); self.bell_badge.set_valign(Gtk.Align.START); self.bell_badge.set_no_show_all(True)
         bellbox = Gtk.Box(); bellbox.pack_start(self.bell, False, False, 0)
@@ -603,25 +832,247 @@ class LiveShell:
             b.connect("clicked", lambda w, k=key: self.show_tray(k, w))
             self.tray_btns[key] = b
             right.pack_start(b, False, False, 0)
+        vb = icon_button("shield", 17, "VPN", None, pad=7)
+        vb.connect("clicked", lambda w: self.show_tray("vpn", w)); vb.set_no_show_all(True)
+        self.tray_btns["vpn"] = vb
+        right.pack_start(vb, False, False, 0); right.reorder_child(vb, list(right.get_children()).index(self.tray_btns["wifi"]) + 1)
         self.bt_ico, self.wifi_ico = self.tray_btns["bluetooth"].ico, self.tray_btns["wifi"].ico
         self.pwr_btn = icon_button("power", 16, "Log out, restart or power off", None, pad=7)    # always visible, also on desktops without a battery
         self.pwr_btn.connect("clicked", lambda w: self.power_menu(w))
         right.pack_start(self.pwr_btn, False, False, 0)
         self.bat_btn = Gtk.Button(); self.bat_btn.set_relief(Gtk.ReliefStyle.NONE)
         bb = Gtk.Box(spacing=4); bb.set_margin_start(6); bb.set_margin_end(6)
-        self.bat_ico = Ico("battery", 22, (1, 1, 1, 0.95)); self.bat_lbl = label("", "title")
+        self.bat_ico = Ico("battery", 22, (1, 1, 1, 0.95)); self.bat_ico.charging = False; self.bat_lbl = label("", "title")
         bb.pack_start(self.bat_ico, False, False, 0); bb.pack_start(self.bat_lbl, False, False, 0)
         self.bat_btn.add(bb); self.bat_btn.set_tooltip_text("Power")
         self.bat_btn.connect("clicked", lambda w: self.show_tray("power", w))
         right.pack_start(self.bat_btn, False, False, 0)
         self.clock_btn = Gtk.Button(); self.clock_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.clock_lbl = label("", "title"); self.clock_lbl.set_margin_start(8); self.clock_lbl.set_margin_end(8)
+        self.clock_lbl = label("", "title panelclock"); self.clock_lbl.set_margin_start(8); self.clock_lbl.set_margin_end(8)
         self.clock_btn.add(self.clock_lbl); self.clock_btn.set_tooltip_text("Calendar")
         self.clock_btn.connect("clicked", lambda w: self.show_tray("clock", w))
         right.pack_start(self.clock_btn, False, False, 6)
         self.panel.pack_end(right, False, False, 0)
         self.desk.put(self.panel, 0, 0)
         self.desk.add_glass(self.panel, "panel", 0, shadow=False, rim=False)
+        self._panel_menus()
+        self._init_sni()
+
+
+    # ---- right-click menus (dock items and panel icons)
+    def _ctx_popup(self, w, items, width=220):
+        """Open a glass menu next to widget `w`: below a top panel, above a bottom panel / bottom dock."""
+        self.close_flyouts()
+        top = w.get_toplevel()
+        gw = top.get_window() if top is not None else None
+        pt = w.translate_coordinates(top, 0, 0) if gw is not None else None
+        if pt is None:
+            return
+        _, ox, oy = gw.get_origin()
+        a = w.get_allocation()
+        mx, my, mw, mh = self.mon
+        y0 = oy + pt[1]
+        low = y0 > my + mh / 2
+        m = GlassMenu(items, theme=self.theme, min_width=width)
+        m.popup_at(ox + pt[0] + a.width / 2 - width / 2, y0 - 6 if low else y0 + a.height + 6, above=low)
+
+    def _focus_win(self, w):
+        ts = Gtk.get_current_event_time()
+        if w.is_minimized():
+            w.unminimize(ts)
+        if w.get_workspace() and w.get_workspace() != self.wnck.get_active_workspace():
+            w.get_workspace().activate(ts)
+        w.activate(ts)
+
+    def _dock_menu(self, b):
+        h = getattr(self, "_hover", None)
+        if h is not None:
+            h.hide_now()
+        app, wins = b.app, [x for x in b.wins if self._alive(x)]
+        items = [("head", b.dname)]
+        ctx = Gdk.Display.get_default().get_app_launch_context()
+        if app is not None:
+            items.append(("itemi", "plus", "New window" if wins else "Open", lambda: self.launch(app)))
+            if isinstance(app, Gio.DesktopAppInfo):
+                acts = app.list_actions()
+                if acts:
+                    items.append(("sep",))
+                for act in acts:
+                    items.append(("itemi", "arrow_right", app.get_action_name(act), lambda a=act: app.launch_action(a, ctx)))
+        if wins:
+            items.append(("sep",))
+            if len(wins) > 1:
+                for w in wins[:8]:
+                    items.append(("itemi", "windows", (w.get_name() or "Window")[:38], lambda w=w: self._focus_win(w)))
+                items.append(("sep",))
+            w0 = wins[0]
+            allmin = all(x.is_minimized() for x in wins)
+            items.append(("itemi", "minimize", "Restore" if allmin else "Minimise",
+                          (lambda: [self._focus_win(x) for x in wins]) if allmin else (lambda: [x.minimize() for x in wins])))
+            maxed = w0.is_maximized()
+            items.append(("itemi", "maximize", "Unmaximise" if maxed else "Maximise", lambda: w0.unmaximize() if maxed else w0.maximize()))
+        pin_app = app
+        if pin_app is None and wins:                    # a running app that is not in the dock: find its launcher so it can be pinned
+            try:
+                pin_app = next((a for a in self.apps if self._matches(a, wins[0])), None)
+            except Exception:
+                pin_app = None
+        if pin_app is not None:
+            pinned = pin_app.get_id() in self._fav_ids()
+            items += [("sep",), ("itemi", "pin", "Unpin from dock" if pinned else "Pin to dock", lambda: self.pin_toggle(pin_app))]
+        if wins:
+            ts = Gtk.get_current_event_time()
+            items += [("sep",), ("itemi", "close", "Close all windows" if len(wins) > 1 else "Close", lambda: [x.close(ts) for x in wins])]
+        self._ctx_popup(b, items)
+
+    def _panel_menus(self):
+        """Right-click menus on the panel's own icons."""
+        def hook(btn, fn):
+            btn.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+            btn.connect("button-press-event", lambda w, ev: (fn(w), True)[1] if ev.button == 3 else False)
+        hook(self.logo_btn, self._menu_logo); hook(self.bell, self._menu_bell); hook(self.pwr_btn, self.power_menu)
+        hook(self.bat_btn, self._menu_power); hook(self.clock_btn, self._menu_clock)
+        hook(self.tray_btns["vpn"], self._menu_vpn)
+        for k, fn in (("wifi", self._menu_wifi), ("bluetooth", self._menu_bt), ("volume", self._menu_volume), ("brightness", self._menu_light)):
+            hook(self.tray_btns[k], fn)
+
+    def _menu_logo(self, w):
+        self._ctx_popup(w, [("head", "glitterDE"), ("itemi", "grid", "Open launcher", self.toggle_launcher), ("sep",),
+                            ("itemi", "folder_line", "Files", lambda: services.fire(["sparkfiles"])),
+                            ("itemi", "terminal", "Terminal", lambda: services.fire(["sparkterm"])),
+                            ("itemi", "gear", "Settings", lambda: services.fire(["sparksettings"])),
+                            ("sep",), ("itemi", "panel_left", "Panel settings…", lambda: services.fire(["sparksettings", "Panel"]))])
+
+    def _menu_bell(self, w):
+        self._ctx_popup(w, [("check", "Do not disturb", self.dnd, lambda: self.set_dnd(not self.dnd)),
+                            ("itemi", "close", "Clear all notifications", self.clear_notifs, bool(self.notifs)), ("sep",),
+                            ("itemi", "gear", "Notification settings…", lambda: services.fire(["sparksettings", "Notifications"]))])
+
+    def set_dnd(self, on):
+        self.dnd = bool(on)
+        q = getattr(self, "q", {}).get("dnd")
+        if q is not None:
+            ctx = q.get_style_context(); ctx.add_class("on") if self.dnd else ctx.remove_class("on")
+
+    def _menu_wifi(self, w):
+        def got(out):
+            on = (out or "").strip() == "enabled"
+            items = [("itemi", "wifi", "Turn Wi-Fi off" if on else "Turn Wi-Fi on", lambda: services.fire(["nmcli", "radio", "wifi", "off" if on else "on"])),
+                     ("itemi", "refresh", "Rescan networks", lambda: services.fire(["nmcli", "device", "wifi", "rescan"]), on), ("sep",),
+                     ("itemi", "network", "Network settings…", lambda: services.fire(["sparksettings", "Network"]))]
+            if shutil.which("nm-connection-editor"):
+                items.append(("itemi", "gear", "Connection editor…", lambda: services.fire(["nm-connection-editor"])))
+            self._ctx_popup(w, items)
+        services.run_async(["nmcli", "radio", "wifi"], got)
+
+    def _menu_vpn(self, w):
+        self._ctx_popup(w, [("itemi", "network", "Network settings…", lambda: services.fire(["sparksettings", "Network"]))])
+
+    def _menu_bt(self, w):
+        bt = self.bt
+        on = bool(getattr(bt, "available", False) and bt.powered)
+        self._ctx_popup(w, [("itemi", "bluetooth", "Turn Bluetooth off" if on else "Turn Bluetooth on", lambda: bt.set_power(not on),
+                             bool(getattr(bt, "available", False))), ("sep",),
+                            ("itemi", "gear", "Bluetooth settings…", lambda: services.fire(["sparksettings", "Bluetooth"]))])
+
+    def _menu_volume(self, w):
+        def got(v, muted):
+            items = [("itemi", "volume", "Unmute" if muted else "Mute", self.audio.toggle_mute, self.audio.available),
+                     ("itemi", "arrow_up", "Volume +5%", lambda: self.audio.set((v or 0) + 0.05), self.audio.available),
+                     ("itemi", "chev_down", "Volume -5%", lambda: self.audio.set((v or 0) - 0.05), self.audio.available), ("sep",)]
+            if shutil.which("pavucontrol"):
+                items.append(("itemi", "volume", "Volume mixer…", lambda: services.fire(["pavucontrol"])))
+            items.append(("itemi", "gear", "Sound settings…", lambda: services.fire(["sparksettings", "Audio"])))
+            self._ctx_popup(w, items)
+        self.audio.get(got)
+
+    def _menu_light(self, w):
+        tool = shutil.which("gammastep") or shutil.which("redshift")
+        items = []
+        if tool:
+            name = os.path.basename(tool)
+            items += [("itemi", "brightness", "Night light on", lambda: services.fire([name, "-O", "3500"])),
+                      ("itemi", "brightness", "Night light off", lambda: services.fire([name, "-x"])), ("sep",)]
+        items.append(("itemi", "monitor", "Display settings…", lambda: services.fire(["sparksettings", "Display"])))
+        self._ctx_popup(w, items)
+
+    def _menu_power(self, w):
+        items = [("head", "Power profile")]
+        if shutil.which("powerprofilesctl"):
+            for prof, lab in (("power-saver", "Power saver"), ("balanced", "Balanced"), ("performance", "Performance")):
+                items.append(("itemi", "battery" if False else "chip", lab, lambda p=prof: services.fire(["powerprofilesctl", "set", p])))
+            items.append(("sep",))
+        items.append(("itemi", "gear", "Power settings…", lambda: services.fire(["sparksettings", "Power"])))
+        self._ctx_popup(w, items)
+
+    def _menu_clock(self, w):
+        h24, dt = bool(prefs.get("panel.clock_24h")), bool(prefs.get("panel.clock_date"))
+        sec = bool(prefs.get("panel.clock_seconds"))
+        self._ctx_popup(w, [("check", "24-hour clock", h24, lambda: prefs.set("panel.clock_24h", not h24)),
+                            ("check", "Show seconds", sec, lambda: prefs.set("panel.clock_seconds", not sec)),
+                            ("check", "Show date", dt, lambda: prefs.set("panel.clock_date", not dt)), ("sep",),
+                            ("itemi", "gear", "Panel settings…", lambda: services.fire(["sparksettings", "Panel"]))])
+
+
+    # ---- app tray icons (StatusNotifierItem / AppIndicator): see tray.py
+    def _init_sni(self):
+        self.sni = None
+        try:
+            from . import tray
+            self.sni = tray.Tray(lambda: GLib.idle_add(self._sni_changed))
+        except Exception as e:
+            print("glitterde: tray unavailable:", e, file=sys.stderr)
+
+    def _sni_changed(self):
+        if self.sni is None:
+            return False
+        for ch in self.sni_box.get_children():
+            self.sni_box.remove(ch); ch.destroy()
+        items = self.sni.visible_items()
+        for it in items:
+            b = Gtk.Button(); b.set_relief(Gtk.ReliefStyle.NONE); b.set_focus_on_click(False)
+            pb = it.pixbuf(17)
+            img = Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image.new_from_icon_name("application-x-executable", Gtk.IconSize.MENU)
+            img.set_margin_start(6); img.set_margin_end(6); img.set_margin_top(4); img.set_margin_bottom(4)
+            b.add(img); b.set_tooltip_text(it.title or None)
+            b.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.SCROLL_MASK)
+            b.connect("button-press-event", lambda w, ev, it=it: self._sni_press(w, ev, it))
+            b.connect("scroll-event", lambda w, ev, it=it: self._sni_scroll(ev, it))
+            self.sni_box.pack_start(b, False, False, 0)
+            b.show_all()                                  # sni_box is no_show_all: its own show_all() does nothing, each child must be shown
+        self.sni_box.set_visible(bool(items))
+        return False
+
+    def _sni_pos(self, w, ev):
+        return int(ev.x_root), int(ev.y_root)
+
+    def _sni_press(self, w, ev, it):
+        x, y = self._sni_pos(w, ev)
+        if ev.button == 1:
+            if not it.activate(x, y):                     # menu-only item (ItemIsMenu): left click opens the menu too
+                self._sni_menu(w, it, x, y)
+        elif ev.button == 2:
+            it.secondary(x, y)
+        elif ev.button == 3:
+            self._sni_menu(w, it, x, y)
+        return True
+
+    def _sni_scroll(self, ev, it):
+        d = {Gdk.ScrollDirection.UP: -1, Gdk.ScrollDirection.DOWN: 1, Gdk.ScrollDirection.LEFT: -1, Gdk.ScrollDirection.RIGHT: 1}.get(ev.direction)
+        if d is not None:
+            it.scroll(d, ev.direction in (Gdk.ScrollDirection.LEFT, Gdk.ScrollDirection.RIGHT))
+        return True
+
+    def _sni_menu(self, w, it, x, y):
+        w.set_has_tooltip(False)                          # a tooltip would sit on top of the menu
+        GLib.timeout_add(2500, lambda: (w.set_has_tooltip(True), False)[1])
+
+        def got(items):
+            if items is None:
+                it.native_menu(x, y)                      # no DBusMenu: let the app draw its own context menu
+                return
+            self._ctx_popup(w, items, 230)
+        it.menu_items(got)
 
     # ----------------------------------------------- quick settings popups (spec HIG s.23)
     def _init_tray(self):
@@ -659,6 +1110,9 @@ class LiveShell:
         menus.close_all(keep if isinstance(keep, menus.GlassMenu) else None)
         if keep != "tray":
             self.close_tray()
+        pr = getattr(self, "_pres", None)
+        if pr is not None and keep != "panelsearch" and pr.get_visible():
+            pr.hide()
         if keep != "launcher" and getattr(self, "launcher_visible", False):
             self.close_launcher()
         h = getattr(self, "_hover", None)
@@ -694,6 +1148,7 @@ class LiveShell:
         self.tray.restyle()
         for ch in self.tray_box.get_children():
             self.tray_box.remove(ch)
+        self.tray_box.set_spacing(8)
         self.tray_kind = kind
         getattr(self, "_tray_" + kind)(self.tray_box)
         self.tray_box.show_all()
@@ -764,25 +1219,80 @@ class LiveShell:
             self.wifi_model = netui.WifiModel(self._net_host())
         box.pack_start(netui.WifiPanel(self.wifi_model, self._net_host()), False, False, 0)
 
+    def _vpn_model(self):
+        if getattr(self, "wifi_model", None) is None:
+            self.wifi_model = netui.WifiModel(self._net_host())
+        return self.wifi_model
+
+    def _tray_vpn(self, box):
+        box.pack_start(netui.VpnPanel(self._vpn_model(), self._net_host()), False, False, 0)
+
+    def _vpn_update(self):
+        """The VPN button only exists while a profile does; its shield lights up while one is connected (details open in its own flyout)."""
+        m = self._vpn_model()
+        vpns = m.vpns()
+        b = self.tray_btns["vpn"]
+        on = [v for v in vpns if v["uuid"] in m.active]
+        b.set_visible(bool(vpns) and prefs.get("panel.tray_vpn"))
+        b.ico.set_icon("shield", (1, 1, 1, 0.95 if on else 0.45))
+        b.set_tooltip_text(("VPN connected: " + ", ".join(v["name"] for v in on)) if on else "VPN off")
+
+    def _vpn_poll(self):
+        m = self._vpn_model()
+        m.add_listener(self._vpn_update)
+        m.refresh()
+
     def _tray_bluetooth(self, box):
         box.pack_start(netui.BtPanel(self.bt, self._net_host()), False, False, 0)
 
     # -- audio
     def _tray_volume(self, box):
-        self._tray_head(box, "volume", "Audio output")
+        """Sound flyout: title with a mute button, one big volume slider with its percentage, then the output devices as a tidy list."""
+        box.set_spacing(10)
         if not self.audio.available:
+            self._tray_head(box, "volume", "Sound")
             box.pack_start(self._empty("No audio control found. Install pipewire (wpctl) or pulseaudio-utils (pactl)."), False, False, 4)
             return
         holder = {}
+        head = Gtk.Box(spacing=8)
+        head.pack_start(Ico("volume", 16, scheme.ink(), 1.5), False, False, 0)
+        head.pack_start(label("Sound", "big"), True, True, 0)
+        mute = Gtk.Button(label="Mute"); mute.get_style_context().add_class("clear"); mute.set_focus_on_click(False)
+        head.pack_end(mute, False, False, 0)
+        box.pack_start(head, False, False, 2)
+        row = Gtk.Box(spacing=10)
+        vol_ico = Ico("volume", 16, scheme.ink(), 1.5)
+        row.pack_start(vol_ico, False, False, 0)
+        sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1); sc.set_draw_value(False); sc.set_hexpand(True)
+        pct = label("", "title", 1.0, ellipsize=False); pct.set_width_chars(4)
+        row.pack_start(sc, True, True, 0); row.pack_end(pct, False, False, 0)
+        box.pack_start(row, False, False, 2)
+        st = {"t": None, "muted": False}
 
+        def changed(w):
+            pct.set_text("%d%%" % round(w.get_value()))
+            if st["t"]:
+                GLib.source_remove(st["t"])
+            v = w.get_value() / 100.0
+            st["t"] = GLib.timeout_add(80, lambda: (self.audio.set(v), st.update(t=None), False)[2])
+        sc.connect("value-changed", changed)
+
+        def paint_mute(m):
+            st["muted"] = bool(m)
+            mute.set_label("Unmute" if m else "Mute")
+            vol_ico.set_opacity(0.4 if m else 1.0)
+        mute.connect("clicked", lambda *_: (self.audio.toggle_mute(), paint_mute(not st["muted"])))
+        sep = Gtk.Separator(); box.pack_start(sep, False, False, 0)
+        hd = label("OUTPUT", "tiny"); box.pack_start(hd, False, False, 0)
         devs = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.pack_start(devs, False, False, 0)
 
         def got(v, muted):
-            holder["sc"] = self._tray_slider(box, v if v is not None else 0.5, self.audio.set, "volume")
-            self._tray_btn(box, "Mute / unmute", self.audio.toggle_mute)
-            h = label("OUTPUT DEVICE", "tiny"); h.set_margin_top(4)
-            box.pack_start(h, False, False, 0); box.pack_start(devs, False, False, 0); box.show_all()
+            holder["sc"] = sc
+            sc.set_value((v if v is not None else 0.5) * 100); pct.set_text("%d%%" % round(sc.get_value()))
+            paint_mute(muted)
             self.audio.sinks(fill)
+        box.show_all()
 
         def fill(rows):
             if self.tray_kind != "volume":
@@ -790,13 +1300,19 @@ class LiveShell:
             for ch in devs.get_children():
                 devs.remove(ch); ch.destroy()
             for key, name, default in rows:
-                b = Gtk.Button(); b.get_style_context().add_class("clear")
-                r = Gtk.Box(spacing=8)
+                b = Gtk.Button(); b.set_relief(Gtk.ReliefStyle.NONE); b.set_focus_on_click(False)
+                if default:
+                    b.get_style_context().add_class("tile"); b.get_style_context().add_class("on")
+                r = Gtk.Box(spacing=10)
+                for m_, v_ in (("top", 7), ("bottom", 7), ("start", 8), ("end", 8)):
+                    getattr(r, "set_margin_" + m_)(v_)
                 tick = Ico("check", 13, scheme.ink(), 2.0); tick.set_opacity(1.0 if default else 0.0)
-                r.pack_start(tick, False, False, 0); r.pack_start(label(name), True, True, 0)
+                r.pack_start(tick, False, False, 0)
+                nm = label(name, "title"); nm.set_max_width_chars(30)
+                r.pack_start(nm, True, True, 0)
                 b.add(r)
                 b.connect("clicked", lambda _b, k=key: self.audio.set_default(k, lambda: (self.tray_kind == "volume" and self.audio.sinks(fill),
-                                                                                         self.audio.get(lambda v2, m2: holder["sc"].set_value((v2 if v2 is not None else 0.5) * 100)) if "sc" in holder else None)))
+                                                                                         self.audio.get(lambda v2, m2: sc.set_value((v2 if v2 is not None else 0.5) * 100)))))
                 devs.pack_start(b, False, False, 0)
             if not rows:
                 devs.pack_start(self._empty("No output devices found."), False, False, 0)
@@ -818,27 +1334,142 @@ class LiveShell:
             box.pack_start(self._empty("Night light needs gammastep or redshift."), False, False, 4)
 
     # -- power
+    def _seg_button(self, text, on, cb):
+        b = Gtk.Button(label=text); b.set_relief(Gtk.ReliefStyle.NONE)
+        if on:
+            b.get_style_context().add_class("on")
+        b.connect("clicked", lambda *_: cb())
+        return b
+
     def _tray_power(self, box):
+        box.set_spacing(10)
         self._tray_head(box, "battery", "Power")
-        b = services.battery()
-        box.pack_start(label("Battery %d%%%s" % (b[0], " - charging" if b[1] else "") if b else "Running on mains power (no battery)", "muted"), False, False, 2)
+        self._pw = {}
+        top = Gtk.Box(spacing=12)
+        self._pw["ico"] = Ico("battery", 34, scheme.ink(), 1.6); self._pw["ico"].charging = False
+        top.pack_start(self._pw["ico"], False, False, 0)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0); col.set_valign(Gtk.Align.CENTER)
+        self._pw["pct"] = label("", "flybig"); self._pw["state"] = label("", "muted", ellipsize=False)
+        self._pw["state"].set_line_wrap(True); self._pw["state"].set_max_width_chars(30)
+        col.pack_start(self._pw["pct"], False, False, 0); col.pack_start(self._pw["state"], False, False, 0)
+        top.pack_start(col, True, True, 0)
+        box.pack_start(top, False, False, 0)
+        self._pw["bar"] = LevelBar(0.0, (0.66, 0.55, 1.0, 1), 8)
+        box.pack_start(self._pw["bar"], False, False, 0)
+        self._pw["stats"] = Gtk.Box(spacing=8, homogeneous=True)
+        box.pack_start(self._pw["stats"], False, False, 0)
         if shutil.which("powerprofilesctl"):
-            row = Gtk.Box(spacing=6, homogeneous=True)
-            for prof, lab in (("power-saver", "Saver"), ("balanced", "Balanced"), ("performance", "Perf")):
-                bt = Gtk.Button(label=lab); bt.get_style_context().add_class("tile")
-                bt.connect("clicked", lambda _b, p_=prof: services.fire(["powerprofilesctl", "set", p_])); row.pack_start(bt, True, True, 0)
-            box.pack_start(row, False, False, 4)
-        self._tray_btn(box, "Lock screen (not built yet)", lambda: None, False)
-        self._tray_btn(box, "Log out", lambda: self.confirm_power("logout"))
-        self._tray_btn(box, "Restart…", lambda: self.confirm_power("reboot"))
-        self._tray_btn(box, "Power off…", lambda: self.confirm_power("poweroff"))
+            h = label("POWER MODE", "tiny"); h.set_margin_top(2)
+            box.pack_start(h, False, False, 0)
+            self._pw["seg"] = Gtk.Box(spacing=4, homogeneous=True); self._pw["seg"].get_style_context().add_class("flyseg")
+            box.pack_start(self._pw["seg"], False, False, 0)
+            self._power_profiles()
+        h = label("SESSION", "tiny"); h.set_margin_top(2)
+        box.pack_start(h, False, False, 0)
+        row = Gtk.Box(spacing=8, homogeneous=True)
+        for ico, text, kind in (("arrow_right", "Log out", "logout"), ("refresh", "Restart", "reboot"), ("power", "Power off", "poweroff")):
+            bt = Gtk.Button(); bt.set_relief(Gtk.ReliefStyle.NONE); bt.get_style_context().add_class("tile")
+            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5); v.set_margin_top(4); v.set_margin_bottom(2)
+            v.pack_start(Ico(ico, 18, scheme.ink(), 1.7), False, False, 0); v.pack_start(label(text, "tiny", 0.5, ellipsize=False), False, False, 0)
+            bt.add(v); bt.connect("clicked", lambda _b, k=kind: self.confirm_power(k)); row.pack_start(bt, True, True, 0)
+        box.pack_start(row, False, False, 0)
         if self.nested:
             box.pack_start(self._empty("Nested test session: Restart / Power off only show what they would do; your computer is not touched."), False, False, 2)
+        self._power_refresh(services.battery_info())
 
-    # -- calendar
+    def _power_refresh(self, b):
+        pw = getattr(self, "_pw", None)
+        if not pw or getattr(self, "tray_kind", None) != "power":
+            return
+        if b is None:
+            pw["ico"].pct = 0.0; pw["pct"].set_text("Mains"); pw["state"].set_text("Running on mains power (no battery)")
+            pw["bar"].set_visible(False)
+            for ch in pw["stats"].get_children():
+                pw["stats"].remove(ch); ch.destroy()
+            pw["ico"].queue_draw(); return
+        chg = b["state"] == "charging"
+        pw["ico"].pct, pw["ico"].charging = b["percent"] / 100.0, chg
+        pw["ico"].queue_draw()
+        pw["pct"].set_text("%d%%" % b["percent"]); pw["state"].set_text(services.battery_text(b))
+        pw["bar"].set_visible(True)
+        pw["bar"].set(b["percent"] / 100.0, (0.55, 0.95, 0.72, 1) if chg else (1.0, 0.55, 0.62, 1) if b["percent"] < 16 else (0.66, 0.55, 1.0, 1))
+        for ch in pw["stats"].get_children():
+            pw["stats"].remove(ch); ch.destroy()
+        facts = []
+        if b.get("watts"):
+            facts.append(("%.1f W" % b["watts"], "Charging" if chg else "Drawing" if b["state"] == "discharging" else "Power"))
+        if b.get("health"):
+            facts.append(("%d%%" % b["health"], "Health"))
+        if b.get("cycles"):
+            facts.append(("%d" % b["cycles"], "Cycles"))
+        for big, small in facts:
+            c = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0); c.get_style_context().add_class("flystat")
+            for m, v in (("top", 7), ("bottom", 7)):
+                getattr(c, "set_margin_" + m)(0)
+            l1 = label(big, "big", 0.5); l1.set_margin_top(7)
+            l2 = label(small, "tiny", 0.5); l2.set_margin_bottom(7)
+            c.pack_start(l1, False, False, 0); c.pack_start(l2, False, False, 0)
+            pw["stats"].pack_start(c, True, True, 0)
+        pw["stats"].set_visible(bool(facts))
+        pw["stats"].show_all()
+
+    def _power_profiles(self):
+        seg = self._pw.get("seg")
+        if seg is None:
+            return
+
+        def got(out):
+            cur = (out or "").strip()
+            if self.tray_kind != "power" or self._pw.get("seg") is not seg:
+                return
+            for ch in seg.get_children():
+                seg.remove(ch); ch.destroy()
+            for prof, lab in (("power-saver", "Saver"), ("balanced", "Balanced"), ("performance", "Performance")):
+                def pick(p_=prof):
+                    services.fire(["powerprofilesctl", "set", p_])
+                    GLib.timeout_add(400, lambda: (self._power_profiles(), False)[1])
+                seg.pack_start(self._seg_button(lab, prof == cur, pick), True, True, 0)
+            seg.show_all()
+        services.run_async(["powerprofilesctl", "get"], got)
+
+    # -- calendar / clock
     def _tray_clock(self, box):
-        cal = Gtk.Calendar(); cal.set_margin_top(2)
-        box.pack_start(cal, False, False, 0)
+        box.set_spacing(6)
+        now = time.localtime()
+        f = self._fly = {}
+        f["time"] = label(time.strftime(self._clock_fmt(), now), "flytime", ellipsize=False)
+        f["date"] = label(time.strftime("%A, %-d %B %Y", now), "flydate", ellipsize=False)
+        tz = ""
+        try:
+            tzn = os.path.realpath("/etc/localtime").split("zoneinfo/")[-1] if "zoneinfo/" in os.path.realpath("/etc/localtime") else ""
+            off = time.strftime("%z", now)
+            utc = "UTC%s%d%s" % (off[0], int(off[1:3]), (":" + off[3:5]) if off[3:5] != "00" else "")
+            tz = (tzn.replace("_", " ") + " - " if tzn else "") + utc
+        except Exception:
+            pass
+        f["tz"] = label(tz, "muted", ellipsize=False)
+        box.pack_start(f["time"], False, False, 0); box.pack_start(f["date"], False, False, 0); box.pack_start(f["tz"], False, False, 0)
+        sep = Gtk.Separator(); sep.set_margin_top(6); sep.set_margin_bottom(2); box.pack_start(sep, False, False, 0)
+        head = Gtk.Box(spacing=2)
+        grid = MonthGrid()
+        title = label(grid.title(), "monthtitle", ellipsize=False)
+        grid.on_change = lambda: title.set_text(grid.title())
+        prev = icon_button("chev_down", 12, "Previous month", lambda: grid.shift(-1), pad=8); prev.ico.set_icon("arrow_left")
+        nxt = icon_button("chev_down", 12, "Next month", lambda: grid.shift(1), pad=8); nxt.ico.set_icon("arrow_right")
+        for b_ in (prev, nxt):
+            b_.ico.color = scheme.ink()
+        tod = Gtk.Button(label="Today"); tod.set_relief(Gtk.ReliefStyle.NONE); tod.get_style_context().add_class("clear")
+        tod.connect("clicked", lambda *_: grid.go_today())
+        head.pack_start(title, False, False, 6)
+        head.pack_end(nxt, False, False, 0); head.pack_end(prev, False, False, 0); head.pack_end(tod, False, False, 6)
+        box.pack_start(head, False, False, 0); box.pack_start(grid, False, False, 0)
+        sep2 = Gtk.Separator(); sep2.set_margin_top(4); box.pack_start(sep2, False, False, 0)
+        foot = Gtk.Box(spacing=6)
+        f["up"] = label(self.uptime_lbl.get_text(), "muted", ellipsize=False)
+        st = Gtk.Button(label="Date & time settings"); st.set_relief(Gtk.ReliefStyle.NONE); st.get_style_context().add_class("clear")
+        st.connect("clicked", lambda *_: (self.close_tray(), services.fire(["sparksettings", "Panel"])))
+        foot.pack_start(f["up"], True, True, 4); foot.pack_end(st, False, False, 0)
+        box.pack_start(foot, False, False, 0)
 
     @staticmethod
     def _with_search_icon(entry, color=(1, 1, 1, 0.85)):
@@ -1590,9 +2221,7 @@ class LiveShell:
         return c
 
     def toggle_dnd(self):
-        self.dnd = not self.dnd
-        ctx = self.q["dnd"].get_style_context()
-        ctx.add_class("on") if self.dnd else ctx.remove_class("on")
+        self.set_dnd(not self.dnd)
 
     def cycle_brightness(self):
         v = self.light.get() or 0.5
@@ -1927,7 +2556,7 @@ class LiveShell:
         img.set_size_request(px, px)
         return img
 
-    def _dock_item(self, app, wins, win_only=None):
+    def _dock_item(self, app, wins, win_only=None, pinned=True):
         b = Gtk.Button(); b.set_relief(Gtk.ReliefStyle.NONE); b.set_focus_on_click(False)
         v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         if win_only is not None:
@@ -1935,24 +2564,44 @@ class LiveShell:
         else:
             gi_ = app.get_icon() or Gio.ThemedIcon.new("application-x-executable")
             img = self._sized_image(None, gi_); name = app.get_display_name()
-        dot = Gtk.DrawingArea(); dot.set_size_request(self.dock_px, 6)
+        vertical_dots = prefs.get("dock.position") in ("left", "right") and self._dock_style == "dock"
+        dot = Gtk.DrawingArea()
+        dot.set_size_request(6 if vertical_dots else self.dock_px, self.dock_px if vertical_dots else 6)
         running = bool(wins)
 
-        def draw_dot(w, cr):                              # active state is read at draw time, so focus changes need no rebuild
+        def draw_dot(w, cr):                              # one dot per open window, up to three; active state is read at draw time
             try:
                 act = any(x.is_active() for x in wins)
             except Exception:
                 act = False
-            cr.set_source_rgba(1, 1, 1, 0.95 if act else 0.55); cr.arc(self.dock_px / 2, 3, 2.2, 0, 6.3)
-            cr.fill() if (running and self.dock_ind) else cr.new_path()
+            if not (running and self.dock_ind):
+                return False
+            n = min(3, max(1, len(wins)))
+            cr.set_source_rgba(1, 1, 1, 0.95 if act else 0.55)
+            gap = 7
+            for i in range(n):
+                off = (i - (n - 1) / 2.0) * gap
+                if vertical_dots:
+                    cr.arc(3, self.dock_px / 2 + off, 2.2, 0, 6.3)
+                else:
+                    cr.arc(self.dock_px / 2 + off, 3, 2.2, 0, 6.3)
+                cr.fill()
             return False
         dot.connect("draw", draw_dot)
-        if prefs.get("dock.indicator_position") == "above":
+        if vertical_dots:                                  # a side dock: indicators on the screen-edge side (left dock: left of the icon)
+            v = Gtk.Box(spacing=1)
+            edge_first = prefs.get("dock.position") == "left"
+            if edge_first:
+                v.pack_start(dot, False, False, 0); v.pack_start(img, False, False, 0)
+            else:
+                v.pack_start(img, False, False, 0); v.pack_start(dot, False, False, 0)
+        elif prefs.get("dock.indicator_position") == "above":
             v.pack_start(dot, False, False, 0); v.pack_start(img, False, False, 0)
         else:
             v.pack_start(img, False, False, 0); v.pack_start(dot, False, False, 0)
         b.add(v); b.set_tooltip_text(name)
-        b.fav_id = app.get_id() if (app is not None and win_only is None) else None
+        b.fav_id = app.get_id() if (app is not None and win_only is None and pinned) else None
+        b.app, b.wins, b.win_only, b.dname = app, wins, win_only, name
         b.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.BUTTON1_MOTION_MASK)
         b.connect("button-press-event", self._dock_press)
         b.connect("motion-notify-event", self._dock_motion)
@@ -1993,6 +2642,9 @@ class LiveShell:
 
     # ---- press / drag-to-reorder / click on the dock (pinned items can be dragged into a new order)
     def _dock_press(self, w, ev):
+        if ev.button == 3:
+            self._dock_menu(w)
+            return True
         if ev.button == 1:
             self._dock_down, self._dock_down_at = True, time.time()
             self._drag = {"x": ev.x_root, "y": ev.y_root, "on": False}
@@ -2066,7 +2718,7 @@ class LiveShell:
 
     def refresh_dock(self, force=False):
         wins = self._windows()
-        sig = (tuple(a.get_id() for a in self.favs), tuple(w.get_xid() for w in wins), self.dock_px, self.dock_ind, prefs.get("dock.indicator_position"))
+        sig = (tuple(a.get_id() for a in self.favs), tuple(w.get_xid() for w in wins), self.dock_px, self.dock_ind, prefs.get("dock.indicator_position"), prefs.get("dock.position"), self._dock_style)
         if sig == getattr(self, "_dock_sig_cur", None) and not force:
             self.dock.queue_draw()
             return                                       # nothing structural changed: keep the buttons (and any click/drag in progress)
@@ -2080,9 +2732,21 @@ class LiveShell:
             mine = [w for w in wins if self._matches(app, w)]
             used.update(id(w) for w in mine)
             self.dock.pack_start(self._dock_item(app, mine), False, False, 0)
+        groups, order = {}, []
         for w in wins:
-            if id(w) not in used:
-                self.dock.pack_start(self._dock_item(None, [w], win_only=w), False, False, 0)
+            if id(w) in used:
+                continue
+            app = next((a for a in self.apps if self._matches(a, w)), None)
+            key = app.get_id() if app is not None else "win:%s" % w.get_xid()
+            if key not in groups:
+                groups[key] = (app, []); order.append(key)
+            groups[key][1].append(w)
+        for key in order:
+            app, ws = groups[key]
+            if app is not None:
+                self.dock.pack_start(self._dock_item(app, ws, pinned=False), False, False, 0)
+            else:
+                self.dock.pack_start(self._dock_item(None, ws, win_only=ws[0], pinned=False), False, False, 0)
         self.dock.show_all()
         self._dock_key = None
         self.relayout()
@@ -2555,9 +3219,15 @@ class LiveShell:
         self.close_launcher()
 
     # ------------------------------------------------------- ticking / panel
+    def _clock_fmt(self):
+        sec = bool(prefs.get("panel.clock_seconds"))
+        if prefs.get("panel.clock_24h"):
+            return "%H:%M:%S" if sec else "%H:%M"
+        return "%-I:%M:%S %p" if sec else "%-I:%M %p"
+
     def tick_clock_once(self):
         now = time.localtime()
-        tfmt = "%H:%M" if prefs.get("panel.clock_24h") else "%-I:%M %p"
+        tfmt = self._clock_fmt()
         txt = time.strftime(tfmt, now)
         if prefs.get("panel.clock_date"):
             txt = time.strftime("%a, %b %-d  ", now) + txt
@@ -2566,18 +3236,45 @@ class LiveShell:
         self.big_date.set_text(time.strftime("%A, %B %-d", now))
         up = int(self.stats.uptime()); h, m = up // 3600, up % 3600 // 60
         self.uptime_lbl.set_text("Up %dh %02dm" % (h, m) if h else "Up %d min" % m)
+        fly = getattr(self, "_fly", None)
+        if fly and getattr(self, "tray_kind", None) == "clock":
+            fly["time"].set_text(time.strftime(tfmt, now))
+            fly["date"].set_text(time.strftime("%A, %-d %B %Y", now))
+            fly["up"].set_text(self.uptime_lbl.get_text())
         return now
 
     def tick_clock(self):
+        """(Re)start the clock ticker: once a second, aligned to the second, when seconds are shown; else once a minute."""
+        if getattr(self, "_clock_src", 0):
+            GLib.source_remove(self._clock_src); self._clock_src = 0
         now = self.tick_clock_once()
-        GLib.timeout_add_seconds(61 - now.tm_sec, lambda: (self.tick_clock(), False)[1])
+        frac = time.time() % 1.0
+        if prefs.get("panel.clock_seconds"):
+            ms = int((1.0 - frac) * 1000) + 8
+        else:
+            ms = int((60 - now.tm_sec - frac) * 1000) + 8
+        self._clock_src = GLib.timeout_add(max(20, ms), self._clock_fire)
+
+    def _clock_fire(self):
+        self._clock_src = 0
+        self.tick_clock()
+        return False
+
+    def tick_battery(self):
+        b = services.battery_info()
+        self.bat_btn.set_visible(b is not None and bool(prefs.get("panel.tray_battery")))
+        if b:
+            self.bat_ico.pct = b["percent"] / 100.0
+            self.bat_ico.charging = b["state"] == "charging"
+            self.bat_ico.queue_draw()
+            self.bat_lbl.set_text("%d%%" % b["percent"])
+            self.bat_btn.set_tooltip_text("%d%% - %s" % (b["percent"], services.battery_text(b)))
+            if getattr(self, "tray_kind", None) == "power":
+                self._power_refresh(b)
+        return True
 
     def tick_slow(self):
-        b = services.battery()
-        self.bat_btn.set_visible(b is not None and prefs.get("panel.tray_battery"))
-        if b:
-            self.bat_ico.pct = b[0] / 100.0; self.bat_ico.queue_draw()
-            self.bat_lbl.set_text("%d%%" % b[0])
+        self.tick_battery()
         net_open = "network" in self.enabled
         if net_open:                                # don't poll hardware for widgets nobody can see
             self.refresh_network(); self._poll_ssid()
@@ -2585,6 +3282,8 @@ class LiveShell:
             self._update_net_icon()
         if not getattr(self, "_bt_drawn", False):
             self._bt_drawn = True; self.refresh_bt()
+        if not self.demo and self.tray is not None and not (self.tray.get_visible() and self.tray_kind in ("wifi", "vpn")):
+            self._vpn_poll()
         return True
 
     # ------------------------------------------------------------- demo
@@ -2650,6 +3349,9 @@ class LiveShell:
     def _place_dock(self, W, H, top, bot):
         pos = prefs.get("dock.position")
         self.dock.set_orientation(Gtk.Orientation.HORIZONTAL if pos == "bottom" else Gtk.Orientation.VERTICAL)
+        side = pos in ("left", "right")                  # a side dock is a slim column: less padding left/right, more top/bottom
+        for m, v in (("start", 8 if side else 14), ("end", 8 if side else 14), ("top", 12 if side else 8), ("bottom", 12 if side else 6)):
+            getattr(self.dock, "set_margin_" + m)(v)
         w, h = self.dock.get_preferred_width()[1], self.dock.get_preferred_height()[1]
         mx, my, W, H = self.mon                 # the dock sits on the primary monitor
         if pos == "bottom":

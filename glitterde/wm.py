@@ -73,6 +73,7 @@ class Client:
         self.grabbed = False                 # passive click grab installed (only on windows that are not the focused top window)
         self.minw = self.minh = 0            # WM_NORMAL_HINTS minimum client size
         self._cp = None                      # last compositor hints written (skip identical rewrites)
+        self.cdepth = 24                     # colour depth of the client window: 32 = it has an alpha channel and draws its own shadow / rounding
         self.ext = (0, 0, 0, 0)              # _GTK_FRAME_EXTENTS (left, right, top, bottom): the transparent shadow a CSD window draws around itself
         self.types = []                      # _NET_WM_WINDOW_TYPE atoms
         self.unframed_type = False           # menus, docks, tooltips ...: never framed, whatever hints they carry
@@ -121,7 +122,7 @@ class WM:
             "_NET_WM_WINDOW_TYPE_DIALOG _NET_WM_WINDOW_TYPE_UTILITY _NET_WM_WINDOW_TYPE_SPLASH _NET_WM_WINDOW_TYPE_MENU "
             "_NET_WM_WINDOW_TYPE_TOOLTIP _NET_WM_WINDOW_TYPE_NOTIFICATION _NET_WM_WINDOW_TYPE_POPUP_MENU "
             "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU _NET_WM_WINDOW_TYPE_COMBO _NET_WM_WINDOW_TYPE_DND _NET_WM_WINDOW_TYPE_TOOLBAR "
-            "_NET_WM_STATE_SKIP_TASKBAR _GLITTER_LAUNCHER _GLITTER_MONITORS _NET_MOVERESIZE_WINDOW _NET_WM_MOVERESIZE \n            _GLITTER_BLUR _GLITTER_SHADOW _GLITTER_RADIUS _GLITTER_BODY_Y _GLITTER_OPAQUE _GLITTER_BLUR_H _GLITTER_RIM _GLITTER_CLIP WM_WINDOW_ROLE _MOTIF_WM_HINTS _GTK_FRAME_EXTENTS _NET_WM_STATE_ABOVE _NET_WM_ICON _GLITTER_WINMENU _GLITTER_DOCKAPP").split()}
+            "_NET_WM_STATE_SKIP_TASKBAR _GLITTER_LAUNCHER _GLITTER_MONITORS _NET_MOVERESIZE_WINDOW _NET_WM_MOVERESIZE \n            _GLITTER_BLUR _GLITTER_SHADOW _GLITTER_RADIUS _GLITTER_BODY_Y _GLITTER_OPAQUE _GLITTER_BLUR_H _GLITTER_RIM _GLITTER_CLIP _GLITTER_FIT WM_WINDOW_ROLE _MOTIF_WM_HINTS _GTK_FRAME_EXTENTS _NET_WM_STATE_ABOVE _NET_WM_ICON _GLITTER_WINMENU _GLITTER_DOCKAPP").split()}
         A = self.A
         self.unframed_types = {A[k] for k in A if k.startswith("_NET_WM_WINDOW_TYPE_") and k.split("TYPE_")[1] in
                                ("DOCK", "SPLASH", "MENU", "TOOLTIP", "NOTIFICATION", "POPUP_MENU", "DROPDOWN_MENU",
@@ -200,7 +201,11 @@ class WM:
         pop = c.cls in self.POPUP_RADIUS
         # frameless apps without a shadow of their own (Firefox, Chrome, Electron, Qt ...) paint square corners: the compositor rounds them.
         # GTK client-side windows (they declare _GTK_FRAME_EXTENTS) draw their own rounded corners and shadow.
-        own_csd = c.csd and not c.glass and not any(c.ext)
+        # An ARGB (32-bit) client-side-decorated window (Chrome, Electron, GTK) paints its own soft shadow and rounded corners inside a
+        # transparent margin. Rounding / rimming / shadowing that rectangle drew the rim around the OUTSIDE of the client's shadow, a
+        # dark gap with a hard line, whenever its _GTK_FRAME_EXTENTS were missing, zero or not yet updated. Only opaque frameless
+        # apps (Firefox, Qt, ...) get the compositor's rounding.
+        own_csd = c.csd and not c.glass and not any(c.ext) and c.cdepth != 32
         typed = None if (pop or c.decorated or c.csd or c.is_dock or c.glass) else self._type_round(c.types)
         blur_on = (c.glass or pop or c.decorated) and not c.fullscreen
         blur = self.blur_lvl if blur_on else 0
@@ -216,6 +221,8 @@ class WM:
             rad = 0
         shadow = int(self.shadow_on and not full and (c.decorated or pop or own_csd or bool(typed and typed[1])))
         opaque = (1 if scheme.is_dark() else 2) if c.fullscreen else 0       # fullscreen glass must not show the desktop behind it
+        if not opaque and not self.theme.transparency and (c.glass or pop or c.decorated or own_csd):
+            opaque = 1 if scheme.is_dark() else 2        # Transparency off: a solid backdrop under every glass window, whatever alpha it paints with
         # foreign apps paint an opaque body: blur only the titlebar strip (not the whole window) and let the compositor draw the rim + round the corners
         blur_h = TH if (c.decorated and not c.glass and not full) else 0
         rim = 1 if (c.decorated and not c.glass and not full) else (2 if (own_csd and rad) else 0)
@@ -245,7 +252,7 @@ class WM:
         rad = self.theme.rad(spec[0])
         if rad <= 0:
             return
-        for atom, v in (("_GLITTER_RADIUS", rad), ("_GLITTER_CLIP", 1), ("_GLITTER_SHADOW", int(self.shadow_on and spec[1])), ("_GLITTER_RIM", 2)):
+        for atom, v in (("_GLITTER_RADIUS", rad), ("_GLITTER_CLIP", 1), ("_GLITTER_SHADOW", int(self.shadow_on and spec[1])), ("_GLITTER_RIM", 2), ("_GLITTER_FIT", 1)):
             w.change_property(self.A[atom], Xatom.CARDINAL, 32, [v])
         self.d.flush()
 
@@ -542,6 +549,10 @@ class WM:
             pass
         return X.Mod4Mask
 
+    MEDIA_KEYS = {"XF86AudioRaiseVolume": "vol-up", "XF86AudioLowerVolume": "vol-down", "XF86AudioMute": "mute", "XF86AudioMicMute": "mic-mute",
+                  "XF86AudioPlay": "play-pause", "XF86AudioPause": "pause", "XF86AudioStop": "stop", "XF86AudioNext": "next",
+                  "XF86AudioPrev": "prev", "XF86MonBrightnessUp": "bright-up", "XF86MonBrightnessDown": "bright-down"}
+
     def _grab_keys(self):
         self.keys = {}
         self.launcher_kcs = set()                         # keycodes of the bare-Super keys (matched by code on release, see on_key_release)
@@ -559,6 +570,17 @@ class WM:
                 self.keys[(kc, base)] = tag
             if tag == "launcher":
                 self.launcher_kcs.add(kc)
+        try:
+            XK.load_keysym_group("xf86")                  # python-xlib only knows the XF86* names after this
+        except Exception:
+            pass
+        for name, act in self.MEDIA_KEYS.items():         # hardware media / volume / brightness keys, with or without Caps/Num Lock
+            kc = self.d.keysym_to_keycode(XK.string_to_keysym(name))
+            if not kc:
+                continue
+            for m in mods:
+                self.root.grab_key(kc, m, True, X.GrabModeAsync, X.GrabModeAsync)
+            self.keys[(kc, 0)] = "media-" + act
 
     def _adopt_existing(self):
         for w in self.root.query_tree().children:
@@ -626,10 +648,13 @@ class WM:
     def _recheck_decor(self, c):
         """A client changed _MOTIF_WM_HINTS / _GTK_FRAME_EXTENTS after it was mapped (Chrome does this when it switches between its own
         titlebar and the system one): update the shadow insets and, if it now draws (or no longer draws) its own titlebar, re-frame it."""
-        if c.is_desktop or c.is_dock or c.unframed_type or c.fullscreen:
+        if c.is_desktop or c.is_dock or c.unframed_type:
             return
         csd = self._client_decorates_itself(c.win)
         c.ext = self._frame_extents(c.win) if csd else (0, 0, 0, 0)
+        if c.fullscreen:                                 # keep the insets current (Chrome rewrites them while leaving fullscreen) but do not re-frame now
+            c._cp = None
+            return
         if csd != c.csd:
             self._redecorate(c)
         else:                                    # same decoration, but the shadow insets changed: whether the compositor rounds it depends on them
@@ -859,6 +884,7 @@ class WM:
         if c.decorated and self._client_decorates_itself(win):     # CSD / frameless apps draw their own titlebar
             c.decorated, c.csd = False, True
         c.ext = self._frame_extents(win) if c.csd else (0, 0, 0, 0)
+        c.cdepth = g.depth
         c.types = types
         c.title = self._text(win, self.A["_NET_WM_NAME"], Xatom.WM_NAME)
         try:                                              # honour the client's minimum size when resizing
@@ -907,7 +933,7 @@ class WM:
                 X.PointerMotionMask | X.ExposureMask | X.LeaveWindowMask | X.EnterWindowMask)
         if self.comp and not c.is_desktop:
             c.frame = self.root.create_window(c.x, c.y, fw, fh, 0, 32, X.InputOutput, self.vis32.visual_id,
-                                             background_pixel=0, border_pixel=0, colormap=self.cmap32, event_mask=mask)
+                                             background_pixmap=X.NONE, border_pixel=0, colormap=self.cmap32, event_mask=mask)   # no background: the server must not clear the frame on every resize step (flicker)
         else:
             c.frame = self.root.create_window(c.x, c.y, fw, fh, 0, self.screen.root_depth, X.InputOutput,
                                              **({"background_pixel": self.screen.black_pixel} if c.decorated else {"background_pixmap": X.NONE}),
@@ -1058,16 +1084,32 @@ class WM:
         c.win.send_event(ev, event_mask=X.StructureNotifyMask)
 
     def apply_geometry(self, c, repaint=True):
-        ox, oy = c.off
-        c.frame.configure(x=c.x, y=c.y, width=c.fw, height=c.fh)
-        c.win.configure(x=ox, y=oy, width=c.w, height=c.h)
-        self._shape(c)
-        self._comp_props(c)
-        self._place_handles(c)
-        self._send_configure(c)
-        if repaint:
-            self._paint(c)
-        self.d.flush()
+        # Frame resize, client resize, shape and titlebar repaint are several requests. Without a grab the compositor could composite in
+        # between (a new frame size with an unpainted titlebar, or the old titlebar over a new body): visible flicker while resizing.
+        # Under a server grab it only ever sees the finished state.
+        grabbed = False
+        if self.comp and repaint:
+            try:
+                self.d.grab_server(); grabbed = True
+            except Exception:
+                grabbed = False
+        try:
+            ox, oy = c.off
+            c.frame.configure(x=c.x, y=c.y, width=c.fw, height=c.fh)
+            c.win.configure(x=ox, y=oy, width=c.w, height=c.h)
+            self._shape(c)
+            self._comp_props(c)
+            self._place_handles(c)
+            self._send_configure(c)
+            if repaint:
+                self._paint(c)
+        finally:
+            if grabbed:
+                try:
+                    self.d.ungrab_server()
+                except Exception:
+                    pass
+            self.d.flush()
 
     def toggle_max(self, c):
         if c.is_desktop or (not c.decorated and not c.csd and not c.maximized):
@@ -1619,6 +1661,8 @@ class WM:
                 subprocess.Popen([sys.executable, tool, "--ui"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             except OSError:
                 pass
+        elif tag and tag.startswith("media-"):
+            self._run_app("glitterde-mediakey", tag[6:])
         elif tag == "launcher":                          # Super pressed: it is a "tap" only if released with no other key in between
             self._super_down, self._super_used, self._super_launch_at = True, False, None
         elif tag and tag.startswith("super-"):

@@ -12,7 +12,7 @@ import cairo  # noqa: E402
 
 from . import appkit, config
 from . import icons as ic
-from .gfx import text
+from .gfx import fill_rrect, text
 from .filesops import FileOps
 from .menus import GlassMenu
 from .widgets import popup_menu, Ico, icon_button, label, search_overlay
@@ -96,6 +96,10 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         self.flow.set_row_spacing(6); self.flow.set_column_spacing(6)
         self.flow.connect("child-activated", lambda f, ch: self.open_item(ch.info, ch.file))
         self.flow.connect("button-press-event", self._flow_click)
+        self.flow.connect("button-release-event", self._flow_release)
+        self.flow.connect("selected-children-changed", self._flow_sel_changed)
+        self._keep_sel = None                    # (selected children, pressed child) while a press on a selected icon may turn into a drag
+        self._keeping = False
         self.recent_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.empty = label("", "muted", 0.5, ellipsize=False)
         cbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -122,7 +126,16 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         self.tree.set_headers_clickable(True); self.tree.set_enable_search(False); self.tree.set_rubber_banding(True)
         self.tree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
         self.tree.connect("row-activated", lambda t, path, col: self._open_row(path))
+        self._row_hover = None
+        self.tree.add_events(Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        self.tree.connect("motion-notify-event", self._row_motion)
+        self.tree.connect("leave-notify-event", lambda *_: self._set_row_hover(None))
+        self.tree.connect("draw", self._draw_rows)               # runs before GTK paints the cells: rounded, padded row highlights underneath
         self.tree.connect("button-press-event", self._tree_click)
+        self.tree.connect("button-release-event", self._tree_release)
+        self.tree.get_selection().connect("changed", self._tree_sel_changed)
+        self._tkeep = None                       # (selected paths, pressed path): see _flow_click, the list view has the same problem
+        self._tkeeping = False
         self.cols = {}
         for key, title, idx, expand, right in (("name", "Name", 1, True, False), ("size", "Size", 2, False, True),
                                                ("type", "Type", 3, False, False), ("modified", "Modified", 4, False, False)):
@@ -136,8 +149,8 @@ class SparkFiles(FileOps, appkit.GlassWindow):
             if right:
                 col.set_alignment(1.0)
             if key == "name":
-                pr = Gtk.CellRendererPixbuf(); pr.set_padding(6, 2); col.pack_start(pr, False); col.add_attribute(pr, "pixbuf", 0)
-            tr = Gtk.CellRendererText(); tr.set_padding(12, 5)
+                pr = Gtk.CellRendererPixbuf(); pr.set_padding(6, 3); col.pack_start(pr, False); col.add_attribute(pr, "pixbuf", 0)
+            tr = Gtk.CellRendererText(); tr.set_padding(12, 7)
             tr.set_property("foreground-rgba", Gdk.RGBA(*ink()))
             if key == "name":
                 from gi.repository import Pango
@@ -186,7 +199,7 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         css = Gtk.CssProvider()
         css.load_from_data(("""
         treeview.view.filelist { background-color: transparent; background-image: none; }
-        treeview.view.filelist:selected, treeview.view.filelist:selected:focus { background-color: %s; color: %s; border-radius: 0; }
+        treeview.view.filelist:selected, treeview.view.filelist:selected:focus { background-color: transparent; background-image: none; color: %s; }
         treeview.view.filelist header button { background: transparent; border: none; box-shadow: none; font-weight: 600; padding: 6px 0; }
         .filetab { background-color: %s; border: 1px solid transparent; border-radius: 10px; padding: 1px 3px; }
         .filetab:hover { background-color: %s; }
@@ -195,8 +208,57 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         .filetab.sel label { font-weight: 700; color: %s; }
         .filetab button { padding: 2px 6px; border-radius: 8px; }
         entry.error { border-color: #ff5c7a; box-shadow: 0 0 0 1px #ff5c7a; }
-        """ % (sel, sel_ink, tab, tab_hover, tab_on, tab_edge, band_ink)).encode())
+        """ % (sel_ink, tab, tab_hover, tab_on, tab_edge, band_ink)).encode())
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_USER + 13)
+
+    # ---- list rows: selection and hover drawn as separate rounded pills with a gap between them (a GtkTreeView paints full-width squares)
+    def _row_motion(self, tree, ev):
+        hit = tree.get_path_at_pos(int(ev.x), int(ev.y))
+        self._set_row_hover(hit[0] if hit else None)
+        return False
+
+    def _set_row_hover(self, path):
+        old = self._row_hover
+        if (old.to_string() if old else None) != (path.to_string() if path else None):
+            self._row_hover = path
+            self.tree.queue_draw()
+
+    def _draw_rows(self, tree, cr):
+        rng = tree.get_visible_range()
+        if isinstance(rng, tuple) and len(rng) == 3:
+            ok, first, last = rng
+            if not ok:
+                return False
+        elif isinstance(rng, tuple) and len(rng) == 2 and rng[0] is not None:
+            first, last = rng
+        else:
+            return False
+        dark = scheme.is_dark()
+        sel = (0.66, 0.59, 1.0, 0.46) if dark else (0.38, 0.42, 1.0, 0.40)
+        hov = (1, 1, 1, 0.09) if dark else (0.38, 0.42, 1.0, 0.14)
+        selection = tree.get_selection()
+        hdr = 0
+        try:
+            hdr = tree.get_allocated_height() - tree.get_bin_window().get_height() if False else tree.convert_bin_window_to_widget_coords(0, 0)[1]
+        except Exception:
+            pass
+        W = tree.get_allocated_width()
+        cr.save()
+        cr.rectangle(0, max(0, hdr), W, tree.get_allocated_height())
+        cr.clip()
+        path = first
+        while path is not None:
+            r = tree.get_background_area(path, None)
+            is_sel = selection.path_is_selected(path)
+            is_hov = self._row_hover is not None and path.compare(self._row_hover) == 0
+            if is_sel or is_hov:
+                _x, y = tree.convert_bin_window_to_widget_coords(0, r.y)
+                fill_rrect(cr, 4, y + 2, W - 8, r.height - 4, 10, sel if is_sel else hov)
+            if path.compare(last) == 0:
+                break
+            path.next()
+        cr.restore()
+        return False
 
     # ------------------------------------------------------------- views and sorting
     def _save_view(self):
@@ -307,7 +369,34 @@ class SparkFiles(FileOps, appkit.GlassWindow):
         row = self.store[path]
         self.open_item(row[5], row[6])
 
+    def _tree_sel_changed(self, sel):
+        if self._tkeep is None or self._tkeeping:
+            return
+        self._tkeeping = True
+        try:
+            for p in self._tkeep[0]:
+                if not sel.path_is_selected(p):
+                    sel.select_path(p)
+        finally:
+            self._tkeeping = False
+
+    def _tree_release(self, tree, ev):
+        keep, self._tkeep = self._tkeep, None
+        if keep is not None and ev.button == 1:               # a plain click on one of several selected rows: now select only that one
+            self._tkeeping = True
+            try:
+                sel = tree.get_selection(); sel.unselect_all(); sel.select_path(keep[1])
+            finally:
+                self._tkeeping = False
+        return False
+
     def _tree_click(self, tree, ev):
+        self._tkeep = None
+        if ev.button == 1 and not ev.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
+            hit = tree.get_path_at_pos(int(ev.x), int(ev.y))
+            sel = tree.get_selection()
+            if hit is not None and sel.path_is_selected(hit[0]) and sel.count_selected_rows() > 1:
+                self._tkeep = (sel.get_selected_rows()[1], hit[0])      # keep the multiple selection alive for a possible drag
         if ev.button != 3:
             return False
         hit = tree.get_path_at_pos(int(ev.x), int(ev.y))
@@ -334,14 +423,54 @@ class SparkFiles(FileOps, appkit.GlassWindow):
                 continue
             uri = "trash:///" if name == "Trash" else Gio.File.new_for_path(p).get_uri()
             self._add_row(name, icn, uri)
-        hdr = Gtk.ListBoxRow(); hdr.set_selectable(False); hdr.set_activatable(False)
+        hdr = Gtk.ListBoxRow(); hdr.set_selectable(False); hdr.set_activatable(False); hdr.devhdr = True
         hdr.add(label("Devices", "muted")); self.places.add(hdr)
+        self._refresh_pins()                                    # pinned folders: below the standard folders, above the drives
         self._add_row("Computer", "laptop", "file:///")
         self._refresh_devices()
         mon = Gio.VolumeMonitor.get()
         for sig in ("mount-added", "mount-removed", "mount-changed"):
             mon.connect(sig, lambda *_: GLib.idle_add(self._refresh_devices))      # plug in a stick: it shows up here, unplug: it goes
         self.places.show_all()
+
+    # ---- pinned folders (files.toml  [places] pinned = [uri, ...])
+    def pinned_uris(self):
+        v = config.load("files.toml").get("places", {}).get("pinned", [])
+        return [u for u in v if isinstance(u, str)]
+
+    def is_pinned(self, f):
+        return f.get_uri() in self.pinned_uris()
+
+    def toggle_pin(self, f):
+        uri = f.get_uri()
+        with config.edit("files.toml") as d:
+            lst = [u for u in d.setdefault("places", {}).get("pinned", []) if isinstance(u, str)]
+            d["places"]["pinned"] = [u for u in lst if u != uri] if uri in lst else lst + [uri]
+        self._refresh_pins()
+
+    def _refresh_pins(self):
+        for r in [r for r in self.places.get_children() if getattr(r, "pin", False) or getattr(r, "pinhdr", False)]:
+            self.places.remove(r)
+        kids = self.places.get_children()
+        idx = next((i for i, r in enumerate(kids) if getattr(r, "devhdr", False)), None)
+        if idx is None:
+            return
+        std = {getattr(r, "uri", None) for r in kids}
+        pins = [u for u in self.pinned_uris() if u not in std]
+        if pins:
+            h = Gtk.ListBoxRow(); h.set_selectable(False); h.set_activatable(False); h.pinhdr = True
+            h.add(label("Pinned", "muted")); self.places.insert(h, idx); idx += 1
+        for u in pins:
+            f = Gio.File.new_for_uri(u)
+            r = Gtk.ListBoxRow(); r.uri = u; r.pin = True
+            b = Gtk.Box(spacing=10); b.pack_start(Ico("pin", 14, ink(), 1.5), False, False, 2)
+            nm = f.get_basename() or u
+            lab = label(nm, "title"); lab.set_tooltip_text(f.get_path() or u)
+            b.pack_start(lab, False, False, 0)
+            r.add(b); self.places.insert(r, idx); idx += 1
+        self.places.show_all()
+        if getattr(self, "cwd", None) is not None:
+            self._sync_sidebar()
 
     def _refresh_devices(self):
         """Mounted drives under Devices, each with an eject button when it can be unmounted."""
@@ -802,10 +931,46 @@ class SparkFiles(FileOps, appkit.GlassWindow):
     def _flow_click(self, w, ev):
         ch = self.flow.get_child_at_pos(ev.x, ev.y)
         self._press_item = (ch.info, ch.file) if ch is not None else None
+        self._keep_sel = None
+        self._drag_pending = None
+        plain = not ev.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)
+        if ev.button == 1 and ch is not None and ev.type == Gdk.EventType.BUTTON_PRESS:
+            self._drag_pending = (ev.x_root, ev.y_root, ev.copy())        # a drag starts from _drag_poll once the pointer moves far enough
+            GLib.timeout_add(15, self._drag_poll)
+            sel = self.flow.get_selected_children()
+            if plain and len(sel) > 1 and ch in sel:
+                # Pressing one of several selected icons: GtkFlowBox would collapse the selection to it right now, so a drag could only
+                # ever carry one file. Swallow the press (the selection stays), and collapse to this icon on release if no drag started,
+                # which is what every file manager does.
+                self._keep_sel = (list(sel), ch)
+                self.flow.grab_focus()
+                return True
         if ev.button == 3 and ch is None:
             return self._background_menu(ev)
         if ev.button == 3 and ch is not None:               # GtkFlowBoxChild does not reliably get its own press events: handle the item menu here too
             return self._item_click(ch, ev)
+        return False
+
+    def _flow_sel_changed(self, flow):
+        if self._keep_sel is None or self._keeping:
+            return
+        self._keeping = True
+        try:
+            for c in self._keep_sel[0]:
+                if not c.is_selected():
+                    flow.select_child(c)
+        finally:
+            self._keeping = False
+
+    def _flow_release(self, w, ev):
+        keep, self._keep_sel = self._keep_sel, None
+        self._drag_pending = None
+        if keep is not None and ev.button == 1:            # a plain click on one of several selected icons: select just that one now
+            self._keeping = True
+            try:
+                self.flow.unselect_all(); self.flow.select_child(keep[1])
+            finally:
+                self._keeping = False
         return False
 
     def _key(self, w, ev):

@@ -4,7 +4,11 @@
  *   1. $YAD_GLITTER_CSS                      (a file; for experiments)
  *   2. $XDG_CONFIG_HOME/glitterde/yad.css    (the user's own tweaks, loaded on top of the built-in style)
  *   3. the built-in style below
- * Set YAD_NO_GLITTER=1 to get stock YAD looks. */
+ * Set YAD_NO_GLITTER=1 to get stock YAD looks.
+ *
+ * Light or dark: YAD_GLITTER_SCHEME=dark|light wins; otherwise the desktop's choice is followed, i.e. the
+ * gtk-application-prefer-dark-theme that the glitterDE shell mirrors into gtk-3.0/settings.ini (or a *-dark gtk-theme-name).
+ * The dark style is the light one with its colour tokens swapped (see dark_pairs), so the two cannot drift apart. */
 #include <gtk/gtk.h>
 #include <stdlib.h>
 #include "yad.h"
@@ -54,6 +58,50 @@ static const gchar *builtin_css =
   "selection, entry selection, textview selection { background-color: rgba(122,130,255,0.45); color: #2a2d6e; }\n"
   "separator { background-color: rgba(42,45,110,0.15); }\n";
 
+/* light token -> dark token */
+static const gchar *dark_pairs[][2] = {
+  { "#ece6fa", "#2b2347" },                      /* window background */
+  { "#d9d0f7", "#372d5c" },                      /* header bar */
+  { "#2a2d6e", "#ece8ff" },                      /* ink */
+  { "rgba(255,255,255,0.75)", "rgba(255,255,255,0.10)" },   /* buttons */
+  { "rgba(255,255,255,0.88)", "rgba(255,255,255,0.07)" },   /* fields, lists */
+  { "rgba(255,255,255,0.92)", "rgba(255,255,255,0.10)" },   /* check / radio */
+  { "rgba(42,45,110,0.15)", "rgba(236,232,255,0.16)" },     /* separator */
+  { NULL, NULL }
+};
+
+static gchar *
+replace_all (gchar *str, const gchar *from, const gchar *to)
+{
+  gchar **parts = g_strsplit (str, from, -1);
+  gchar *out = g_strjoinv (to, parts);
+
+  g_strfreev (parts);
+  g_free (str);
+  return out;
+}
+
+static gboolean
+want_dark (void)
+{
+  const gchar *env = g_getenv ("YAD_GLITTER_SCHEME");
+  gboolean dark = FALSE;
+  gchar *theme = NULL;
+
+  if (env && (!g_ascii_strcasecmp (env, "dark") || !g_ascii_strcasecmp (env, "light")))
+    return !g_ascii_strcasecmp (env, "dark");
+
+  g_object_get (gtk_settings_get_default (), "gtk-application-prefer-dark-theme", &dark, "gtk-theme-name", &theme, NULL);
+  if (!dark && theme)
+    {
+      gchar *low = g_ascii_strdown (theme, -1);
+      dark = g_str_has_suffix (low, "-dark") || g_str_has_suffix (low, ":dark");
+      g_free (low);
+    }
+  g_free (theme);
+  return dark;
+}
+
 static void
 load_css (const gchar *data, const gchar *file, guint prio)
 {
@@ -80,6 +128,7 @@ yad_glitter_theme (void)
 {
   const gchar *env = g_getenv ("YAD_GLITTER_CSS");
   gchar *user;
+  gboolean dark;
 
   if (g_getenv ("YAD_NO_GLITTER") || !gdk_screen_get_default ())
     return;
@@ -90,12 +139,24 @@ yad_glitter_theme (void)
       return;
     }
 
-  load_css (builtin_css, NULL, GTK_STYLE_PROVIDER_PRIORITY_USER);
+  dark = want_dark ();
+  if (dark)
+    {
+      gchar *css = g_strdup (builtin_css);
+      gint i;
+
+      for (i = 0; dark_pairs[i][0]; i++)
+        css = replace_all (css, dark_pairs[i][0], dark_pairs[i][1]);
+      load_css (css, NULL, GTK_STYLE_PROVIDER_PRIORITY_USER);
+      g_free (css);
+    }
+  else
+    load_css (builtin_css, NULL, GTK_STYLE_PROVIDER_PRIORITY_USER);
 
   user = g_build_filename (g_get_user_config_dir (), "glitterde", "yad.css", NULL);
   if (g_file_test (user, G_FILE_TEST_IS_REGULAR))
     load_css (NULL, user, GTK_STYLE_PROVIDER_PRIORITY_USER + 1);
   g_free (user);
 
-  g_object_set (gtk_settings_get_default (), "gtk-application-prefer-dark-theme", FALSE, NULL);
+  g_object_set (gtk_settings_get_default (), "gtk-application-prefer-dark-theme", dark, NULL);
 }

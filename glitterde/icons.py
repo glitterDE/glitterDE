@@ -273,6 +273,12 @@ def _collapse(c):
     _poly(c, [(7, 9.5), (12, 5), (17, 9.5)]); c.stroke(); _poly(c, [(7, 14.5), (12, 19), (17, 14.5)]); c.stroke()
 
 
+def _shield(c):
+    c.move_to(12, 2.6); c.line_to(19.5, 5.4); c.curve_to(19.5, 11.5, 17.4, 17.2, 12, 21.2)
+    c.curve_to(6.6, 17.2, 4.5, 11.5, 4.5, 5.4); c.close_path(); c.stroke()
+    c.move_to(8.8, 11.8); c.line_to(11.2, 14.2); c.line_to(15.4, 9.4); c.stroke()
+
+
 ICONS = {k[1:]: v for k, v in list(globals().items()) if k.startswith("_") and not k.startswith("__") and callable(v)
          and k not in ("_begin", "_poly")}
 
@@ -283,11 +289,27 @@ def icon(c, name, cx, cy, s, col, lw=1.7):
     c.restore()
 
 
-def battery(c, cx, cy, s, col, pct=0.74):
+CHARGE = (0.55, 0.95, 0.72, 1)
+
+
+def battery(c, cx, cy, s, col, pct=0.74, charging=False):
+    """Battery outline + level. Charging: the level turns green and a lightning bolt is cut out of it (even-odd), so the bolt
+    reads on any background and at any level."""
     _begin(c, cx, cy, s, col, 1.6)
     rrect(c, 2.5, 6.5, 17, 11, 3.2); c.stroke()
     rrect(c, 20.6, 10.2, 1.8, 3.6, 0.9); c.fill()
-    rrect(c, 4.6, 8.6, 12.8 * pct, 6.8, 1.5); c.fill()
+    pct = max(0.0, min(1.0, pct))
+    if not charging:
+        if pct < 0.16:
+            c.set_source_rgba(1.0, 0.55, 0.62, 1)
+        rrect(c, 4.6, 8.6, max(1.6, 12.8 * pct), 6.8, 1.5); c.fill()
+    else:
+        c.set_source_rgba(*CHARGE)
+        c.set_fill_rule(1)                                  # CAIRO_FILL_RULE_EVEN_ODD
+        rrect(c, 4.6, 8.6, max(1.6, 12.8 * max(pct, 0.55)), 6.8, 1.5)
+        for i, (x, y) in enumerate([(11.9, 7.4), (7.6, 12.6), (10.6, 12.6), (9.6, 16.8), (14.6, 11.0), (11.6, 11.0)]):
+            c.move_to(x, y) if i == 0 else c.line_to(x, y)
+        c.close_path(); c.fill()
     c.restore()
 
 
