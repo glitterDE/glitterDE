@@ -29,9 +29,9 @@ PANEL_H = 38                        # shell panel height: windows are kept below
 MINW, MINH = 220, 120
 STICKY = 0xFFFFFFFF
 NDESK = 4
-MATERIAL = {"sparkfiles": "window_light", "sparksettings": "window_glass", "sparkterm": "window_dark", "sparkcode": "window_light"}
+MATERIAL = {"sparkfiles": "window_light", "sparksettings": "window_glass", "sparkterm": "window_dark", "sparkcode": "window_light", "sparkmonitor": "window_light"}
 ICON_PX = 20                         # app icon in the titlebar
-VECTOR_ICONS = {"sparkfiles": "app_files", "sparkterm": "app_terminal", "sparksettings": "app_settings", "sparkcode": "app_code"}   # our own apps: drawn, not loaded
+VECTOR_ICONS = {"sparkfiles": "app_files", "sparkterm": "app_terminal", "sparksettings": "app_settings", "sparkcode": "app_code", "sparkmonitor": "app_monitor"}   # our own apps: drawn, not loaded
 # Titlebar layouts (window.layout). side None = follow window.button_side. order is left-to-right on the side the buttons sit.
 # style: glyph (hover highlight) | wide (full-height hover blocks) | dots (traffic lights) | circle (always-on round buttons) | ubuntu (orange close)
 LAYOUTS = {
@@ -561,6 +561,7 @@ class WM:
         for name, base, tag in (("F4", X.Mod1Mask, "close"), ("Tab", X.Mod1Mask, "cycle"), ("Super_L", 0, "launcher"),
                                 ("Super_R", 0, "launcher"), ("Print", 0, "shot-menu"),
                                 ("s", self.super_mask | X.ShiftMask, "shot-menu"),      # Super+Shift+S: the screenshot bar, like Print
+                                ("Escape", X.ControlMask | X.ShiftMask, "monitor"),      # Ctrl+Shift+Esc: the task manager
                                 *[(k, self.super_mask, "super-" + t) for k, t in self.SUPER_KEYS.items()]):
             kc = self.d.keysym_to_keycode(XK.string_to_keysym(name))
             if not kc:
@@ -1661,6 +1662,8 @@ class WM:
                 subprocess.Popen([sys.executable, tool, "--ui"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             except OSError:
                 pass
+        elif tag == "monitor":
+            self._run_app("sparkmonitor")
         elif tag and tag.startswith("media-"):
             self._run_app("glitterde-mediakey", tag[6:])
         elif tag == "launcher":                          # Super pressed: it is a "tap" only if released with no other key in between

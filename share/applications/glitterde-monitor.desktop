@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=System Monitor
+GenericName=SparkMonitor
+Comment=Task manager and system monitor for glitterDE
+Exec=sparkmonitor
+Icon=glitterde-monitor
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=sparkmonitor
+Keywords=task manager;processes;cpu;memory;ram;disk;network;performance;kill;

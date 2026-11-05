@@ -10,7 +10,7 @@ LIBDIR  ?= $(PREFIX)/lib/glitterde
 BINDIR  ?= $(PREFIX)/bin
 DATADIR ?= $(PREFIX)/share
 VERSION := $(shell cat VERSION)
-APPS    := glitterde-mediakey glitterde-screenshot glitterde-session glitterde-shell glitterde-welcome glitterde-autostart glitter-wm glitter-comp sparkfiles sparksettings sparkterm sparkcode
+APPS    := glitterde-mediakey glitterde-screenshot glitterde-session glitterde-shell glitterde-welcome glitterde-autostart glitter-wm glitter-comp sparkfiles sparksettings sparkterm sparkcode sparkmonitor
 
 YAD_OK := $(shell command -v autoreconf >/dev/null 2>&1 && command -v intltoolize >/dev/null 2>&1 && echo yes)
 

@@ -272,12 +272,20 @@ def _panel_left(c):
 def _collapse(c):
     _poly(c, [(7, 9.5), (12, 5), (17, 9.5)]); c.stroke(); _poly(c, [(7, 14.5), (12, 19), (17, 14.5)]); c.stroke()
 
+def _memory(c):
+    rrect(c, 3.5, 6.5, 17, 9.5, 2); c.stroke()
+    for x in (7.5, 12, 16.5):
+        _poly(c, [(x, 9.5), (x, 13)]); c.stroke()
+    for x in (6.5, 9.5, 14.5, 17.5):
+        _poly(c, [(x, 16), (x, 19)]); c.stroke()
+
+def _pulse(c):
+    _poly(c, [(2.5, 12.5), (7, 12.5), (9.5, 6), (14, 18.5), (16.5, 12.5), (21.5, 12.5)]); c.stroke()
 
 def _shield(c):
     c.move_to(12, 2.6); c.line_to(19.5, 5.4); c.curve_to(19.5, 11.5, 17.4, 17.2, 12, 21.2)
     c.curve_to(6.6, 17.2, 4.5, 11.5, 4.5, 5.4); c.close_path(); c.stroke()
     c.move_to(8.8, 11.8); c.line_to(11.2, 14.2); c.line_to(15.4, 9.4); c.stroke()
-
 
 ICONS = {k[1:]: v for k, v in list(globals().items()) if k.startswith("_") and not k.startswith("__") and callable(v)
          and k not in ("_begin", "_poly")}
@@ -475,6 +483,12 @@ def app_code(c, cx, cy, s):
     x, y = cx - s / 2, cy - s / 2
     squircle(c, x, y, s, (1.0, 0.70, 0.88, 1), (0.71, 0.48, 1.0, 1), s * 0.28)
     icon(c, "code", cx, cy, s * 0.66, (1, 1, 1, 0.97), 2.3)
+
+
+def app_monitor(c, cx, cy, s):
+    x, y = cx - s / 2, cy - s / 2
+    squircle(c, x, y, s, (0.56, 0.94, 0.84, 1), (0.36, 0.60, 1.0, 1), s * 0.28)
+    icon(c, "pulse", cx, cy, s * 0.70, (1, 1, 1, 0.97), 2.4)
 
 
 def app_update(c, cx, cy, s):
