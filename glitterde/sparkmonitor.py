@@ -27,6 +27,7 @@ from .widgets import Ico, icon_button, label, search_overlay
 
 CFG = "monitor.toml"
 HISTORY = 60                                         # samples kept per graph
+SIDEBAR_WIDTH = 262
 INTERVALS = (("Fast (1 second)", 1.0), ("Normal (2 seconds)", 2.0), ("Slow (5 seconds)", 5.0), ("Paused", 0.0))
 DEFAULTS = {"interval": 2.0, "per_core": False, "kernel": False, "confirm": True, "cmdline": False, "scope": "mine", "sort_col": 4,
             "sort_desc": True, "page": "processes"}
@@ -297,6 +298,7 @@ class SparkMonitor(appkit.GlassWindow):
         outer.pack_start(self._build_sidebar(), False, False, 0)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.notice_box = Gtk.Box(spacing=8)
+        self.notice_box.set_no_show_all(True)
         self.notice_box.get_style_context().add_class("card2")
         self.notice_box.set_border_width(8)
         self.notice_lbl = label("", None, 0.0, ellipsize=False)
@@ -369,16 +371,9 @@ class SparkMonitor(appkit.GlassWindow):
     def _build_sidebar(self):
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         side.get_style_context().add_class("sidebar")
-        side.set_size_request(246, -1)
+        side.set_size_request(SIDEBAR_WIDTH, -1)
+        side.set_hexpand(False)
         side.set_border_width(8)
-        head = Gtk.Box(spacing=4)
-        head.set_margin_start(6)
-        head.pack_start(Ico("pulse", 16, scheme.ink(), 1.8), False, False, 0)
-        head.pack_start(label("SparkMonitor", "h1"), True, True, 4)
-        self.b_menu = icon_button("list", 15, "Options", None, color=scheme.ink(), pad=7)
-        self.b_menu.connect("clicked", lambda b: self._popup_below(b, self._menu_items(), 270))
-        head.pack_end(self.b_menu, False, False, 0)
-        side.pack_start(head, False, False, 2)
         self.cards = {}
         group = None
         specs = (("processes", "Processes", "list", None, None, None), ("cpu", "CPU", "chip", [("cpu", "CPU")], 100, fmt_pct),
@@ -389,6 +384,11 @@ class SparkMonitor(appkit.GlassWindow):
             group = group or card
             self.cards[key] = card
             side.pack_start(card, False, False, 0)
+        side.pack_start(Gtk.Box(), True, True, 0)
+        self.b_menu = icon_button("list", 15, "Options", None, color=scheme.ink(), pad=7)
+        self.b_menu.set_halign(Gtk.Align.START)
+        self.b_menu.connect("clicked", lambda b: self._popup_above(b, self._menu_items(), 270))
+        side.pack_start(self.b_menu, False, False, 0)
         return side
 
     def _make_card(self, group, key, title, icon, series, ymax, fmt):
@@ -407,6 +407,10 @@ class SparkMonitor(appkit.GlassWindow):
         col.set_valign(Gtk.Align.CENTER)
         b.title_l, b.value_l, b.sub_l = label(title, "cardtitle"), label("", "cardval"), label("", "muted")
         for l in (b.title_l, b.value_l, b.sub_l):
+            l.set_ellipsize(Pango.EllipsizeMode.END)
+            l.set_width_chars(1)
+            l.set_max_width_chars(1)
+            l.set_xalign(0.0)
             col.pack_start(l, False, False, 0)
         row.pack_start(col, True, True, 0)
         b.add(row)
@@ -899,11 +903,11 @@ class SparkMonitor(appkit.GlassWindow):
             self._freq = avg
             c["cpu"].sub_l.set_text(si.fmt_hz(avg) if avg else "%d cores" % self.ncpu)
         if mem:
-            c["memory"].value_l.set_text("%s of %s" % (si.fmt_bytes(mem["used"]), si.fmt_bytes(mem["total"])))
-            c["memory"].sub_l.set_text("%d%% in use" % round(mem["used"] / max(1, mem["total"]) * 100))
+            c["memory"].value_l.set_text(si.fmt_bytes(mem["used"]))
+            c["memory"].sub_l.set_text("%d%% of %s" % (round(mem["used"] / max(1, mem["total"]) * 100), si.fmt_bytes(mem["total"])))
         if disk:
-            c["disk"].value_l.set_text("%d%% active" % round(disk["busy"] * 100))
-            c["disk"].sub_l.set_text("R %s  W %s" % (si.fmt_rate(disk["read"]), si.fmt_rate(disk["write"])))
+            c["disk"].value_l.set_text("R %s" % si.fmt_rate(disk["read"]))
+            c["disk"].sub_l.set_text("W %s" % si.fmt_rate(disk["write"]))
         if net:
             c["network"].value_l.set_text("↓ %s" % si.fmt_rate(net["rx"]))
             c["network"].sub_l.set_text("↑ %s" % si.fmt_rate(net["tx"]))
@@ -1091,8 +1095,8 @@ class SparkMonitor(appkit.GlassWindow):
         root = next((f for f in fs if f["mount"] == "/"), fs[0] if fs else None)
         c = self.cards["storage"]
         if root:
-            c.value_l.set_text("%d%% of %s used" % (round(root["used"] / root["total"] * 100), si.fmt_bytes(root["total"], 0)))
-            c.sub_l.set_text("%d file system%s" % (len(fs), "" if len(fs) == 1 else "s"))
+            c.value_l.set_text("%d%% used" % round(root["used"] / root["total"] * 100))
+            c.sub_l.set_text("%s · %d file system%s" % (si.fmt_bytes(root["total"], 0), len(fs), "" if len(fs) == 1 else "s"))
             self.sto_big.set_text("%d%%" % round(root["used"] / root["total"] * 100))
 
     def _open_mount(self, mount):
@@ -1112,7 +1116,9 @@ class SparkMonitor(appkit.GlassWindow):
             b.get_style_context().add_class("choicebtn")
             b.connect("clicked", lambda _b, cb=cb: (self.hide_notice(), cb()))
             self.notice_btns.pack_start(b, False, False, 0)
+        self.notice_box.set_no_show_all(False)
         self.notice_box.show_all()
+        self.notice_box.set_no_show_all(True)
         if self._notice_src:
             GLib.source_remove(self._notice_src)
         self._notice_src = GLib.timeout_add(ms, self.hide_notice)
@@ -1131,6 +1137,15 @@ class SparkMonitor(appkit.GlassWindow):
         _, ox, oy = win.get_origin()
         a = btn.get_allocation()
         GlassMenu(items, light=True, theme=self.th, min_width=width).popup_at(ox + a.x, oy + a.y + a.height + 4)
+
+    def _popup_above(self, btn, items, width=230):
+        win = btn.get_window()
+        if win is None:
+            return
+        _, ox, oy = win.get_origin()
+        a = btn.get_allocation()
+        menu = GlassMenu(items, light=True, theme=self.th, min_width=width)
+        menu.popup_at(ox + a.x, max(0, oy + a.y - 330))
 
     def _menu_items(self):
         o = self.opt

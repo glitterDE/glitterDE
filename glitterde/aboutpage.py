@@ -33,7 +33,7 @@ def _read(path, default=""):
 
 
 def version():
-    return _read(os.path.join(ROOT, "VERSION"), "0.15.0")
+    return _read(os.path.join(ROOT, "VERSION"), "0.15.1")
 
 
 def os_name():

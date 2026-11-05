@@ -3,7 +3,7 @@
 %global _build_id_links none
 
 Name:           glitterde
-Version:        %{?pkgversion}%{!?pkgversion:0.15.0}
+Version:        %{?pkgversion}%{!?pkgversion:0.15.1}
 Release:        1%{?dist}
 Summary:        A customisable but pretty desktop environment :3
 License:        GPL-3.0-only
@@ -99,6 +99,8 @@ make install DESTDIR=%{buildroot} PREFIX=%{_prefix} LIBDIR=%{_prefix}/lib/glitte
 %{_datadir}/doc/glitterde
 
 %changelog
+* Thu Nov 5 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.15.1-1
+- Add SparkMonitor
 * Thu Nov 5 2026 rubythecutie <228643222+rubythecutie@users.noreply.github.com> - 0.15.0-1
 - Allow dragging several selected files at once in SparkFiles
 - Dropping files into the folder they are already in no longer copies them
