@@ -336,13 +336,9 @@ class FileOps:
                       "Duplicated %d item%s" % (len(files), "" if len(files) == 1 else "s"), verb="Copying", total=scan(files), copy_cleanup=True)
 
     def _choose_folder(self, title, verb):
-        d = Gtk.FileChooserDialog(title=title, transient_for=self, action=Gtk.FileChooserAction.SELECT_FOLDER)
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button(verb, Gtk.ResponseType.OK)
-        appkit.style_stock_dialog(d)
-        if self.cwd.get_path():
-            d.set_current_folder(self.cwd.get_path())
-        r = d.run(); path = d.get_filename(); d.destroy()
-        return Gio.File.new_for_path(path) if r == Gtk.ResponseType.OK and path else None
+        from . import filedialog
+        path = filedialog.choose_folder(self, title, start=self.cwd.get_path(), ok=verb)
+        return Gio.File.new_for_path(path) if path else None
 
     def move_to(self, move=True):
         dest = self._choose_folder("Move to" if move else "Copy to", "Move" if move else "Copy")
@@ -418,12 +414,10 @@ class FileOps:
     def open_with_other(self, files):
         ct = (files[0].query_info("standard::content-type", Gio.FileQueryInfoFlags.NONE, None).get_content_type()
               if files else "application/octet-stream")
-        d = Gtk.AppChooserDialog(transient_for=self, modal=True, content_type=ct)
-        d.get_widget().set_show_all(True)
-        appkit.style_stock_dialog(d)
-        if d.run() == Gtk.ResponseType.OK and d.get_app_info():
-            self.open_with(d.get_app_info(), files)
-        d.destroy()
+        from . import pickers
+        app = pickers.choose_app(self, ct, "Open with", "Open")
+        if app is not None:
+            self.open_with(app, files)
 
     def set_wallpaper(self, f):
         if f.get_path():

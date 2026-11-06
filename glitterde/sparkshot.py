@@ -8,7 +8,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
 
-from . import appkit, config, scheme
+from . import appkit, config, filedialog, scheme
 from .menus import ChoiceButton
 from .screenshot import Selector, active_window_rect, crop, grab_screen, notify
 from .widgets import Ico, label
@@ -101,12 +101,9 @@ class SparkShot(appkit.GlassWindow):
         return ("~" + p[len(home):]) if p.startswith(home) else p
 
     def _choose_folder(self):
-        d = Gtk.FileChooserDialog(title="Save screenshots to", transient_for=self, action=Gtk.FileChooserAction.SELECT_FOLDER)
-        appkit.style_stock_dialog(d)
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("Choose", Gtk.ResponseType.OK); d.set_current_folder(self.folder)
-        if d.run() == Gtk.ResponseType.OK and d.get_filename():
-            self.folder = d.get_filename(); config.set("screenshot", "folder", self.folder); self.folder_btn.set_label(self._short(self.folder))
-        d.destroy()
+        p = filedialog.choose_folder(self, "Save screenshots to", start=self.folder, ok="Choose")
+        if p:
+            self.folder = p; config.set("screenshot", "folder", self.folder); self.folder_btn.set_label(self._short(self.folder))
 
     def _pick(self, mode):
         self.mode = mode
@@ -204,14 +201,10 @@ class SparkShot(appkit.GlassWindow):
             pass
 
     def _save_as(self, *_):
-        d = Gtk.FileChooserDialog(title="Save as", transient_for=self, action=Gtk.FileChooserAction.SAVE)
-        appkit.style_stock_dialog(d)
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("Save", Gtk.ResponseType.OK)
-        d.set_do_overwrite_confirmation(True); d.set_current_name(os.path.basename(self.path)); d.set_current_folder(os.path.dirname(self.path))
-        if d.run() == Gtk.ResponseType.OK and d.get_filename():
-            self.shot.savev(d.get_filename(), "png", [], [])
-            self.status.set_text("Saved a copy to %s" % self._short(d.get_filename()))
-        d.destroy()
+        p = filedialog.save_file(self, "Save as", start=os.path.dirname(self.path), name=os.path.basename(self.path))
+        if p:
+            self.shot.savev(p, "png", [], [])
+            self.status.set_text("Saved a copy to %s" % self._short(p))
 
     def _delete(self, *_):
         try:

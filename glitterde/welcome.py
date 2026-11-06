@@ -334,14 +334,11 @@ class Welcome(Gtk.Window):
         return b
 
     def _choose_picture(self, *_):
-        d = Gtk.FileChooserDialog(title="Choose a wallpaper", parent=self, action=Gtk.FileChooserAction.OPEN)
-        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Choose", Gtk.ResponseType.OK)
-        appkit.style_stock_dialog(d)
-        f = Gtk.FileFilter(); f.set_name("Pictures"); f.add_mime_type("image/png"); f.add_mime_type("image/jpeg"); f.add_mime_type("image/webp"); d.add_filter(f)
-        d.set_current_folder(os.path.expanduser("~/Pictures") if os.path.isdir(os.path.expanduser("~/Pictures")) else os.path.expanduser("~"))
-        if d.run() == Gtk.ResponseType.OK:
-            self._pick("wallpaper", d.get_filename())
-        d.destroy()
+        from . import filedialog
+        pics = os.path.expanduser("~/Pictures")
+        p = filedialog.choose_file(self, "Choose a wallpaper", start=pics if os.path.isdir(pics) else os.path.expanduser("~"), filters=[filedialog.PICTURES], ok="Choose")
+        if p:
+            self._pick("wallpaper", p)
 
     def p_done(self):
         name = self.ans["name"]
