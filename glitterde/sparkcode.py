@@ -23,7 +23,7 @@ gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango, PangoCairo  # noqa: E402
 
-from . import appkit, codeutil as cu, config, scheme, synhl
+from . import appkit, codeutil as cu, config, filedialog, scheme, synhl
 from . import icons as ic
 from .menus import GlassConfirm, GlassMenu
 from .widgets import Ico, icon_button, label
@@ -1656,30 +1656,14 @@ class SparkCode(appkit.GlassWindow):
             self.nb.set_current_page((self.nb.get_current_page() + (-1 if back else 1)) % n)
 
     # ---------------------------------------------------------------- dialogs
-    def _chooser(self, title, action, verb, start=None):
-        d = Gtk.FileChooserDialog(title=title, transient_for=self, action=action)
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        d.add_button(verb, Gtk.ResponseType.OK)
-        appkit.style_stock_dialog(d)
-        if start and os.path.isdir(start):
-            d.set_current_folder(start)
-        return d
-
     def open_folder_dialog(self, *_):
-        d = self._chooser("Open folder", Gtk.FileChooserAction.SELECT_FOLDER, "Open", self.root or GLib.get_home_dir())
-        r, p = d.run(), d.get_filename()
-        d.destroy()
-        if r == Gtk.ResponseType.OK and p:
+        p = filedialog.choose_folder(self, "Open folder", start=self.root or GLib.get_home_dir(), ok="Open")
+        if p:
             self.open_folder(p)
 
     def open_file_dialog(self, *_):
-        d = self._chooser("Open file", Gtk.FileChooserAction.OPEN, "Open", self.root or GLib.get_home_dir())
-        d.set_select_multiple(True)
-        r, names = d.run(), d.get_filenames()
-        d.destroy()
-        if r == Gtk.ResponseType.OK:
-            for p in names:
-                self.open_file(p)
+        for p in filedialog.choose_file(self, "Open file", start=self.root or GLib.get_home_dir(), multiple=True) or []:
+            self.open_file(p)
 
     def _dialog(self, title, size=(440, 10)):
         d = appkit.GlassDialog(title, "sparkcode-dialog", parent=self, size=size)
@@ -1784,12 +1768,8 @@ class SparkCode(appkit.GlassWindow):
         doc = doc if isinstance(doc, Doc) else self.cur()
         if doc is None:
             return False
-        d = self._chooser("Save as", Gtk.FileChooserAction.SAVE, "Save", os.path.dirname(doc.path) if doc.path else (self.root or GLib.get_home_dir()))
-        d.set_do_overwrite_confirmation(True)
-        d.set_current_name(doc.name)
-        r, p = d.run(), d.get_filename()
-        d.destroy()
-        if r != Gtk.ResponseType.OK or not p:
+        p = filedialog.save_file(self, "Save as", start=os.path.dirname(doc.path) if doc.path else (self.root or GLib.get_home_dir()), name=doc.name)
+        if not p:
             return False
         try:
             doc.write(p)

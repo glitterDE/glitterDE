@@ -180,6 +180,7 @@ class GlassWindow(Gtk.Window):
         p = Gtk.CssProvider(); p.load_from_data(APP_CSS)
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_USER + 10 + 1)
         self.set_wmclass(wm_class, wm_class)
+        self.wm_class = wm_class                         # dialogs opened from this window share it (titlebar icon)
         self.set_default_size(*size)
         self.set_app_paintable(True)
         self.material = scheme.app_material(material) if light else material       # light apps become dark under the dark scheme

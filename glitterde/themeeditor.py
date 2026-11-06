@@ -12,9 +12,9 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, GObject, Gtk  # noqa: E402
 
-from . import config, scheme, tokens
+from . import appkit, config, pickers, scheme, tokens
 from .menus import ChoiceButton
 from .widgets import label
 
@@ -26,21 +26,6 @@ COLOURS = [("Accent", ("accent", "primary")), ("Pink accent", ("accent", "pink")
            ("Card glass", ("materials", "card", "tint")), ("Window glass", ("materials", "window_glass", "tint")),
            ("Light window", ("materials", "window_light", "tint")), ("Dark window", ("materials", "window_dark", "tint")),
            ("Text on light", ("text", "on_light"))]
-
-EDITOR_CSS = b"""
-dialog.themeeditor-dark, dialog.themeeditor-dark .background { background-color: #23243f; color: #ecebfa; }
-dialog.themeeditor-dark label { color: #ecebfa; }
-dialog.themeeditor-dark label.muted { color: rgba(236,235,250,0.74); }
-dialog.themeeditor-dark entry { background-color: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.18); color: #ffffff; caret-color: #ffffff; }
-dialog.themeeditor-dark button { background-image: none; background-color: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.20); color: #ecebfa; box-shadow: none; text-shadow: none; }
-dialog.themeeditor-dark button:hover { background-color: rgba(255,255,255,0.18); }
-dialog.themeeditor-dark scale trough { background-color: rgba(255,255,255,0.20); }
-dialog.themeeditor-dark scale value { color: #ecebfa; }
-dialog.themeeditor-dark scrolledwindow, dialog.themeeditor-dark viewport { background-color: transparent; }
-dialog.themeeditor-dark scrollbar slider { background-color: rgba(255,255,255,0.36); }
-dialog.themeeditor-light, dialog.themeeditor-light .background { background-color: #f3f1fb; }
-"""
-
 
 # ------------------------------------------------------------------ toml writer
 def _v(v):
@@ -117,14 +102,13 @@ def _set(d, path, v):
     d[path[-1]] = v
 
 
-class ThemeEditor(Gtk.Dialog):
+class ThemeEditor(appkit.GlassDialog):
+    """Glass dialog (follows the colour scheme like every Spark window). Save keeps the theme; Cancel, Esc and the window's close button all put
+    everything back as it was."""
+
     def __init__(self, parent, base, on_done, new_copy=False):
-        super().__init__(title="Theme editor", transient_for=parent, modal=False)
-        dark = scheme.is_dark()                                             # follow the desktop colour scheme, not GTK's default (light) theme
-        ctx = self.get_style_context()
-        ctx.add_class("themeeditor-dark" if dark else "themeeditor-light"); ctx.add_class(scheme.panel_class())
-        prov = Gtk.CssProvider(); prov.load_from_data(EDITOR_CSS)            # screen-wide (a widget-level provider would not reach the children); every rule is scoped by our class
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_USER + 20)
+        super().__init__("Theme editor", getattr(parent, "wm_class", None) or "sparksettings", parent=parent, size=(480, 660))
+        self._done = False
         self.base, self.on_done = base, on_done
         self.prev_theme = config.load().get("appearance", {}).get("theme", "trans-pride")
         self.prev_accent = config.load().get("accent", {}).get("primary")
@@ -146,9 +130,21 @@ class ThemeEditor(Gtk.Dialog):
             for fn in ("theme.toml", "palette.toml"):
                 with open(os.path.join(base.dir, fn), "rb") as f:
                     self.backup[fn] = f.read()
-        self.set_default_size(460, 600)
-        self.add_button("Cancel", Gtk.ResponseType.CANCEL); self.add_button("Save theme", Gtk.ResponseType.OK)
-        self.set_default_response(Gtk.ResponseType.OK)
+        try:                                                                # GlassDialog closes (and would keep the preview) on Escape: Escape must cancel properly
+            sid = GObject.signal_lookup("key-press-event", Gtk.Widget)
+            GObject.signal_handlers_disconnect_matched(self, GObject.SignalMatchType.ID, sid, 0, None, None, None)
+        except Exception:
+            pass
+        self.connect("key-press-event", lambda w, ev: (self._finish(False), True)[1] if ev.keyval == Gdk.KEY_Escape else False)
+        self.connect("delete-event", lambda *_: (self._finish(False), True)[1])
+        save = Gtk.Button(label="Save theme")
+        save.get_style_context().add_class("pill"); save.get_style_context().add_class("active")
+        save.connect("clicked", lambda *_: self._finish(True))
+        row = self.close_btn.get_parent()
+        row.remove(self.close_btn)
+        cancel = Gtk.Button(label="Cancel"); cancel.get_style_context().add_class("pill")
+        cancel.connect("clicked", lambda *_: self._finish(False))
+        row.pack_end(save, False, False, 6); row.pack_end(cancel, False, False, 0)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         for m in ("top", "bottom", "start", "end"):
             getattr(box, "set_margin_" + m)(16)
@@ -169,7 +165,7 @@ class ThemeEditor(Gtk.Dialog):
                 cur = tokens.hex_rgba(_get(self.pal, path))
             except (KeyError, TypeError):
                 continue
-            b = Gtk.ColorButton.new_with_rgba(Gdk.RGBA(*cur[:3], 1.0)); b.set_use_alpha(False)
+            b = pickers.ColorButton.new_with_rgba(Gdk.RGBA(*cur[:3], 1.0))
             b.connect("color-set", lambda bt, p=path: self._colour(p, bt.get_rgba()))
             row = Gtk.Box(spacing=10); row.pack_start(label(title), True, True, 0); row.pack_end(b, False, False, 0)
             box.pack_start(row, False, False, 2)
@@ -182,7 +178,6 @@ class ThemeEditor(Gtk.Dialog):
         note = label("Changes appear on your desktop straight away. Cancel puts everything back; Save keeps the theme.", "muted", ellipsize=False)
         note.set_line_wrap(True); note.set_max_width_chars(48); note.set_xalign(0); note.set_margin_top(6)
         box.pack_start(note, False, False, 0)
-        self.connect("response", self._response)
         self.show_all()
 
     def _slider(self, box, title, lo, hi, step, val, cb):
@@ -221,10 +216,13 @@ class ThemeEditor(Gtk.Dialog):
         config.set("appearance", "theme", self.tid)
         return False
 
-    def _response(self, d, resp):
+    def _finish(self, save):
+        if self._done:
+            return
+        self._done = True
         if self._t:
             GLib.source_remove(self._t); self._t = None
-        if resp == Gtk.ResponseType.OK:
+        if save:
             self._apply()
         else:
             if self.created:

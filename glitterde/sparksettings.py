@@ -12,7 +12,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import aboutpage, appkit, config, desktopenv, displays, gfx, iconpicker, netpages, services, settings_model as model, themeeditor, tokens
+from . import aboutpage, appkit, config, filedialog, gfx, iconpicker, netpages, pickers, services, settings_model as model, themeeditor, tokens
 from . import icons as ic
 from .widgets import Ico, label, search_overlay
 from .menus import ChoiceButton
@@ -312,7 +312,7 @@ class Settings(appkit.GlassWindow):
             w.set_active_id(str(cur))
             w.connect("changed", lambda c: write(c.get_active_id()))
         elif typ == "font":
-            w = Gtk.FontButton(); w.set_font(cur or "Inter 10"); w.connect("font-set", lambda b: write(b.get_font()))
+            w = pickers.FontButton(cur or "Inter 10", mono="mono" in sid); w.connect("font-set", lambda b: write(b.get_font()))
         elif typ == "icon":
             w = Gtk.Button(label="Change icon…"); w.get_style_context().add_class("clear")
             w.connect("clicked", lambda *_: self.list.select_row(self.rows["Launcher"]))
@@ -534,7 +534,7 @@ class Settings(appkit.GlassWindow):
 
     def p_fonts(self):
         p = self.page_box(); c = self.card("GTK applications")
-        fb = Gtk.FontButton(); fb.set_font(Gtk.Settings.get_default().get_property("gtk-font-name") or "Inter 10")
+        fb = pickers.FontButton(Gtk.Settings.get_default().get_property("gtk-font-name") or "Inter 10")
         fb.connect("font-set", lambda b: gtk_ini_set("gtk-font-name", b.get_font()))
         c.inner.pack_start(self.row("Default font for other GTK apps", fb), False, False, 2)
         p.pack_start(c, False, False, 0)
@@ -585,13 +585,11 @@ class Settings(appkit.GlassWindow):
         return p
 
     def _pick_wall(self, *_):
-        d = Gtk.FileChooserDialog(title="Choose wallpaper", transient_for=self, action=Gtk.FileChooserAction.OPEN)
-        appkit.style_stock_dialog(d)
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL); d.add_button("Use", Gtk.ResponseType.OK)
-        f = Gtk.FileFilter(); f.set_name("Pictures"); f.add_mime_type("image/png"); f.add_mime_type("image/jpeg"); d.add_filter(f)
-        if d.run() == Gtk.ResponseType.OK:
-            config.set("wallpaper", "path", d.get_filename())
-        d.destroy()
+        pics = os.path.expanduser("~/Pictures")
+        p = filedialog.choose_file(self, "Choose wallpaper", start=pics if os.path.isdir(pics) else None,
+                                   filters=[filedialog.Filter("Pictures", ("image/png", "image/jpeg"))], ok="Use")
+        if p:
+            config.set("wallpaper", "path", p)
 
     def p_launcher(self):
         p = self.page_box(); c = self.card("Apps menu icon")
@@ -635,14 +633,9 @@ class Settings(appkit.GlassWindow):
         self._dock_refresh()
 
     def _add_fav(self, *_):
-        d = Gtk.AppChooserDialog(transient_for=self, modal=True, content_type="application/octet-stream")
-        d.get_widget().set_show_all(True)
-        appkit.style_stock_dialog(d)
-        if d.run() == Gtk.ResponseType.OK:
-            app = d.get_app_info()
-            if app and app.get_id() not in self._favs():
-                self._save_favs(self._favs() + [app.get_id()])
-        d.destroy()
+        app = pickers.choose_app(self, "application/octet-stream", "Add to the dock", "Add")
+        if app is not None and app.get_id() not in self._favs():
+            self._save_favs(self._favs() + [app.get_id()])
 
     WIDGETS = [("clock", "Clock"), ("system", "System"), ("network", "Network"), ("bluetooth", "Bluetooth"),
                ("phone", "GlitterLink"), ("media", "Now playing"), ("quick", "Quick actions"), ("notifications", "Notifications")]
