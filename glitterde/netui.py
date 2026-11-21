@@ -489,7 +489,11 @@ def refit(widget, delay=170):
         before = None
         if gw is not None:
             before = (top.get_position(), top.get_allocated_height())
+        # A 1px request forces GTK to recalculate the window from the
+        # Revealer's new natural size.  Queue the allocation as well: without
+        # it GTK3 may retain the previous window height when the row closes.
         top.resize(w, 1)
+        top.queue_resize()
 
         def settle():
             if gw is not None and before is not None and top.get_visible():
